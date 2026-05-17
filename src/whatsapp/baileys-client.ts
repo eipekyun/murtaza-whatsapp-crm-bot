@@ -6,11 +6,17 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import type { RuntimeConfig } from '../config.js';
 import type { MessageRouter } from '../router.js';
-import type { InboundMessage } from '../types.js';
+import type { InboundMessage, OutboundMessage } from '../types.js';
 import { writeQrArtifacts } from './qr-artifacts.js';
 import { shouldReconnectAfterClose } from './reconnect-policy.js';
 
-export async function startBaileysClient(config: RuntimeConfig, router: MessageRouter): Promise<WASocket> {
+export interface BaileysClientOptions {
+  onOutboundSent?: (message: OutboundMessage) => Promise<void>;
+  onHistorySync?: (chunk: { imported: number; progress?: number }) => Promise<void>;
+  onSocketReady?: (sock: WASocket) => void;
+}
+
+export async function startBaileysClient(config: RuntimeConfig, router: MessageRouter, options: BaileysClientOptions = {}): Promise<WASocket> {
   const { state, saveCreds } = await useMultiFileAuthState(config.authDir);
   const { version } = await fetchLatestBaileysVersion();
 
@@ -18,10 +24,24 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
     auth: state,
     version,
     printQRInTerminal: false,
+    syncFullHistory: false,
     browser: ['MURTAZA', 'Chrome', '0.1.0']
   });
 
   sock.ev.on('creds.update', saveCreds);
+  options.onSocketReady?.(sock);
+
+  sock.ev.on('messaging-history.set', async ({ messages, progress }) => {
+    let imported = 0;
+    for (const raw of messages) {
+      const inbound = toInboundMessage(config, raw);
+      if (!inbound) continue;
+      await router.handleInbound(inbound);
+      imported += 1;
+    }
+    if (imported > 0) console.log(`WhatsApp history chunk kaydedildi: imported=${imported} progress=${progress ?? 'unknown'}`);
+    await options.onHistorySync?.({ imported, progress: progress ?? undefined });
+  });
 
   sock.ev.on('connection.update', (update) => {
     if (update.qr) {
@@ -44,7 +64,7 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
       const shouldReconnect = shouldReconnectAfterClose(statusCode);
       console.log(`WhatsApp bağlantısı kapandı. shouldReconnect=${shouldReconnect} status=${statusCode ?? 'unknown'}`);
       if (shouldReconnect) {
-        void startBaileysClient(config, router);
+        void startBaileysClient(config, router, options);
       }
     }
   });
@@ -56,7 +76,20 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
 
       const decision = await router.handleInbound(inbound);
       if (decision.shouldReply && decision.replyText) {
-        await sock.sendMessage(inbound.chatId, { text: decision.replyText });
+        await sendTypingPause(sock, inbound.chatId, decision.replyDelayMs ?? 2500);
+        const sent = await sock.sendMessage(inbound.chatId, { text: decision.replyText });
+        await options.onOutboundSent?.({
+          tenantId: config.tenantId,
+          channel: 'whatsapp',
+          provider: 'baileys',
+          direction: 'outbound',
+          origin: 'bot',
+          messageId: sent?.key.id ?? `bot-${inbound.messageId}`,
+          chatId: inbound.chatId,
+          recipientPhone: inbound.senderPhone,
+          text: decision.replyText,
+          sentAt: new Date()
+        });
       }
     }
   });
@@ -72,8 +105,9 @@ export function toInboundMessage(config: RuntimeConfig, raw: proto.IWebMessageIn
   const messageId = key.id;
   if (!chatId || !messageId) return null;
 
-  const text = extractText(raw.message);
-  if (!text) return null;
+  const media = extractMedia(raw.message);
+  const text = extractText(raw.message) || media?.fallbackText;
+  if (!text && !media) return null;
 
   const senderJid = key.participant || chatId;
   const senderPhone = senderJid.split('@')[0] ?? senderJid;
@@ -87,9 +121,28 @@ export function toInboundMessage(config: RuntimeConfig, raw: proto.IWebMessageIn
     chatId,
     senderPhone,
     senderDisplayName: raw.pushName ?? undefined,
-    text,
+    text: text ?? '',
+    mediaKind: media?.kind,
+    mediaName: media?.name,
+    mediaMime: media?.mime,
     receivedAt: new Date(Number(raw.messageTimestamp ?? Date.now() / 1000) * 1000)
   };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function sendTypingPause(sock: WASocket, chatId: string, delayMs: number): Promise<void> {
+  const safeDelay = Math.max(1000, Math.min(8000, delayMs));
+  try {
+    await sock.presenceSubscribe(chatId);
+    await sock.sendPresenceUpdate('composing', chatId);
+    await delay(safeDelay);
+    await sock.sendPresenceUpdate('paused', chatId);
+  } catch {
+    await delay(safeDelay);
+  }
 }
 
 function extractText(message: proto.IMessage | null | undefined): string | null {
@@ -99,6 +152,22 @@ function extractText(message: proto.IMessage | null | undefined): string | null 
     message.extendedTextMessage?.text ||
     message.imageMessage?.caption ||
     message.videoMessage?.caption ||
+    message.documentMessage?.caption ||
     null
   );
+}
+
+function extractMedia(message: proto.IMessage | null | undefined): { kind: InboundMessage['mediaKind']; name?: string; mime?: string; fallbackText: string } | null {
+  if (!message) return null;
+  if (message.imageMessage) return { kind: 'image', mime: message.imageMessage.mimetype ?? 'image/jpeg', fallbackText: '[Görsel]' };
+  if (message.videoMessage) return { kind: 'video', mime: message.videoMessage.mimetype ?? 'video/mp4', fallbackText: '[Video]' };
+  if (message.audioMessage) return { kind: 'audio', mime: message.audioMessage.mimetype ?? 'audio/ogg', fallbackText: '[Ses]' };
+  if (message.stickerMessage) return { kind: 'sticker', mime: message.stickerMessage.mimetype ?? 'image/webp', fallbackText: '[Sticker]' };
+  if (message.documentMessage) return {
+    kind: 'document',
+    name: message.documentMessage.fileName ?? undefined,
+    mime: message.documentMessage.mimetype ?? 'application/octet-stream',
+    fallbackText: `[Dosya] ${message.documentMessage.fileName ?? ''}`.trim()
+  };
+  return null;
 }

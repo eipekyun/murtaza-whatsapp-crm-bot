@@ -8,7 +8,10 @@ const config: RuntimeConfig = {
   dbPath: './data/poc.sqlite',
   authDir: './data/auth/esmark-test',
   whitelistPhones: ['905322013401'],
-  autoReply: true
+  autoReply: true,
+  autoReplyAudience: 'whitelist',
+  operatorPort: 8787,
+  operatorToken: '0123456789abcdef0123456789abcdef'
 };
 
 describe('baileys inbound message mapping', () => {

@@ -11,3 +11,5 @@ data/*.log
 data/*.tmp
 logs/
 .DS_Store
+.hermes/
+data/

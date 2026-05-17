@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { shouldReconnectAfterClose } from '../src/whatsapp/reconnect-policy.js';
 
 describe('WhatsApp reconnect policy', () => {
-  it('does not auto-reconnect after QR timeout to avoid repeated pairing attempts', () => {
-    expect(shouldReconnectAfterClose(408)).toBe(false);
+  it('auto-reconnects after 408 connection-lost timeouts on an already paired session', () => {
+    expect(shouldReconnectAfterClose(408)).toBe(true);
   });
 
   it('does not auto-reconnect after explicit logout', () => {

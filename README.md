@@ -44,3 +44,19 @@ WhatsApp “birazdan tekrar dene” benzeri uyarı verirse botu açık bırakıp
 ## Güvenlik
 
 İlk PoC whitelist modundadır. `BOT_WHITELIST_PHONES` dışında gelen mesajlar loglanır ama cevaplanmaz.
+
+### Operatör paneli auth (2026-05-13 audit sonrası eklendi)
+
+`http://127.0.0.1:8787` operatör paneli artık **Bearer token** zorunlu.
+
+- Token kaynağı:
+  1. `BOT_OPERATOR_TOKEN` env (16+ karakter); ya da
+  2. `data/operator-token.txt` (chmod 600, ilk açılışta otomatik üretilir).
+- Bot başlatıldığında console şunu yazar: `Operatör paneli hazır: http://127.0.0.1:8787/?token=<TOKEN>`
+- `?token=` query string ile bir kez açılınca token sessionStorage'a düşer ve URL'den temizlenir.
+- Tüm `/api/*` istekleri `Authorization: Bearer <TOKEN>` ister; eksik/yanlış olursa 401.
+- `/` (HTML dashboard) kilitlenmemiştir; sadece API kilitlidir. Token'ı bilmeyen biri panel'i açabilir ama hiçbir veri çekemez/gönderemez.
+
+**Neden eklendi:** Mac'te aynı user altında çalışan herhangi bir process (tarayıcı, başka CLI) `127.0.0.1:8787/api/send` ile WhatsApp mesajı gönderebiliyordu. Bearer token bu vektörü kapatır.
+
+**Token rotasyonu:** `data/operator-token.txt` dosyasını sil → bot restart → yeni token üretilir.
