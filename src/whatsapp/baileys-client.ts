@@ -135,6 +135,7 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
       void resolveGroupName(inbound.chatId);
 
       const decision = await router.handleInbound(inbound);
+      console.log(`Router kararı: chat=…${inbound.chatId.split('@')[0].slice(-4)} cevap=${decision.shouldReply} sebep=${decision.reason}`);
       if (decision.shouldReply && decision.replyText) {
         const replyText = decision.replyText;
         const sinceIso = inbound.receivedAt.toISOString();

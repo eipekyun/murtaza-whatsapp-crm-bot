@@ -32,9 +32,9 @@ export function createRouter(options: RouterOptions): MessageRouter {
       if (isRecent(context?.lastManualReplyAt, 30 * 60 * 1000, options.now?.())) {
         return { shouldReply: false, reason: 'recent_manual_reply' };
       }
-      if (isRecent(context?.lastBotReplyAt, 12 * 60 * 60 * 1000, options.now?.())) {
-        return { shouldReply: false, reason: 'recent_bot_reply' };
-      }
+      // Not: "son 12 saatte bot cevapladıysa susma" kuralı kaldırıldı — operatör cevaplamadıkça
+      // bot yeni mesajlara cevap verebilmeli. Çift cevap/spam'i grace'teki shouldStillReply önler
+      // (bot kendi son cevabından önce gelen mesajları atlar → bir mesaj burst'üne tek cevap).
 
       const reply = buildContextualReply(message, options.now?.() ?? new Date());
       if ((options.getAutoReplyAudience?.() ?? 'whitelist') === 'all') {
