@@ -25,6 +25,8 @@ export interface OperatorServerOptions {
   markChatRead?: (chatId: string, trigger: 'open' | 'reply') => Promise<void> | void;
   getWaStatus?: () => { state: string; me?: string };
   relinkWhatsApp?: () => Promise<void> | void;
+  getReplyDelayMinutes?: () => number;
+  setReplyDelayMinutes?: (minutes: number) => Promise<void> | void;
   sendWhatsAppMessage: (payload: WhatsAppSendPayload) => Promise<string | undefined>;
 }
 
@@ -58,7 +60,7 @@ export function createOperatorHttpServer(options: OperatorServerOptions): Server
         return sendJson(res, { messages: await options.store.listMessagesByChat(options.tenantId, chatId) });
       }
       if (req.method === 'GET' && parsed.pathname === '/api/settings') {
-        return sendJson(res, { autoReplyAudience: options.getAutoReplyAudience?.() ?? 'whitelist' });
+        return sendJson(res, { autoReplyAudience: options.getAutoReplyAudience?.() ?? 'whitelist', replyDelayMinutes: options.getReplyDelayMinutes?.() ?? 3 });
       }
       if (req.method === 'GET' && parsed.pathname === '/api/conversation-settings') {
         const chatId = parsed.searchParams.get('chatId');
@@ -95,6 +97,9 @@ export function createOperatorHttpServer(options: OperatorServerOptions): Server
         const body = await readJson(req);
         const audience = body.autoReplyAudience === 'all' ? 'all' : 'whitelist';
         await options.setAutoReplyAudience?.(audience);
+        if (body.replyDelayMinutes !== undefined && Number.isFinite(Number(body.replyDelayMinutes))) {
+          await options.setReplyDelayMinutes?.(Number(body.replyDelayMinutes));
+        }
         return sendJson(res, { ok: true, autoReplyAudience: audience });
       }
       if (req.method === 'GET' && parsed.pathname === '/api/history-import') {
@@ -411,7 +416,11 @@ body{margin:0;background:var(--bg);color:var(--text)}
           </select>
           <button id="saveAudience" class="btn primary">Kaydet</button>
         </div>
-        <p class="sub">Herkes seçilirse bot whitelist kontrolü yapmadan cevap verir.</p>
+        <div class="row" style="margin-top:8px">
+          <input id="replyDelay" type="number" min="0" max="120" style="flex:1;background:#2a3942;color:var(--text);border:0;border-radius:8px;padding:10px" />
+          <span class="sub" style="flex:0 0 auto">dk sonra bot cevaplar</span>
+        </div>
+        <p class="sub">Herkes seçilirse bot whitelist kontrolü yapmadan cevap verir. Bekleme: müşteri yazdıktan sonra bu süre içinde operatör cevap vermezse bot otomatik yazar. 0 = hemen.</p>
       </div>
 
       <div class="card">
@@ -819,8 +828,9 @@ body{margin:0;background:var(--bg);color:var(--text)}
 
   $('saveAudience').onclick = async function(){
     var autoReplyAudience = $('audienceSelect').value;
-    await api('/api/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ autoReplyAudience: autoReplyAudience }) });
-    alert('Kaydedildi: ' + autoReplyAudience);
+    var replyDelayMinutes = parseInt($('replyDelay').value, 10); if (isNaN(replyDelayMinutes) || replyDelayMinutes < 0) replyDelayMinutes = 0;
+    await api('/api/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ autoReplyAudience: autoReplyAudience, replyDelayMinutes: replyDelayMinutes }) });
+    alert('Kaydedildi (kapsam: ' + autoReplyAudience + ', bekleme: ' + replyDelayMinutes + ' dk)');
   };
 
   $('saveConvSettings').onclick = async function(){
@@ -844,6 +854,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
   async function loadSettings(){
     var s = await api('/api/settings');
     $('audienceSelect').value = s.autoReplyAudience || 'whitelist';
+    $('replyDelay').value = (s.replyDelayMinutes != null ? s.replyDelayMinutes : 3);
   }
   async function loadHistoryStatus(){
     var s = await api('/api/history-import');

@@ -27,6 +27,8 @@ export interface BaileysClientOptions {
   onMessageStatus?: (messageId: string, status: number) => Promise<void> | void;
   onAfterReply?: (chatId: string) => Promise<void> | void;
   onConnectionState?: (state: string, me?: string) => void;
+  getBotReplyDelayMs?: () => number;
+  shouldStillReply?: (chatId: string, sinceIso: string) => Promise<boolean>;
 }
 
 export async function startBaileysClient(config: RuntimeConfig, router: MessageRouter, options: BaileysClientOptions = {}): Promise<WASocket> {
@@ -99,6 +101,12 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
 
     if (update.connection === 'open') {
       console.log(`WhatsApp bağlantısı hazır: tenant=${config.tenantId}`);
+      // Baileys'in ilk app-state senkronu rehber (contacts/critical_unblock_low) koleksiyonunu
+      // eksik çekiyor; bağlanınca app-state'i yeniden senkronlayıp kayıtlı kişi adlarını tam alırız.
+      setTimeout(() => {
+        void (sock as unknown as { resyncAppState?: (c: string[], i: boolean) => Promise<void> }).resyncAppState?.(['critical_unblock_low', 'regular_high', 'regular_low', 'regular'], false)
+          .catch((error: unknown) => console.error('Rehber resync hatası:', error instanceof Error ? error.message : error));
+      }, 4000);
     }
 
     if (update.connection === 'close') {
@@ -128,22 +136,35 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
 
       const decision = await router.handleInbound(inbound);
       if (decision.shouldReply && decision.replyText) {
-        await sendTypingPause(sock, inbound.chatId, decision.replyDelayMs ?? 2500);
-        const sent = await sock.sendMessage(inbound.chatId, { text: decision.replyText });
-        if (sent?.key.id) botSentIds.add(sent.key.id);
-        await options.onOutboundSent?.({
-          tenantId: config.tenantId,
-          channel: 'whatsapp',
-          provider: 'baileys',
-          direction: 'outbound',
-          origin: 'bot',
-          messageId: sent?.key.id ?? `bot-${inbound.messageId}`,
-          chatId: inbound.chatId,
-          recipientPhone: inbound.senderPhone,
-          text: decision.replyText,
-          sentAt: new Date()
-        });
-        void options.onAfterReply?.(inbound.chatId);
+        const replyText = decision.replyText;
+        const sinceIso = inbound.receivedAt.toISOString();
+        // Operatöre öncelik: bekleme süresi sonunda operatör araya girmediyse bot cevaplar.
+        const graceMs = options.getBotReplyDelayMs?.() ?? decision.replyDelayMs ?? 2500;
+        setTimeout(() => {
+          void (async () => {
+            try {
+              if (options.shouldStillReply && !(await options.shouldStillReply(inbound.chatId, sinceIso))) return;
+              await sendTypingPause(sock, inbound.chatId, 2500);
+              const sent = await sock.sendMessage(inbound.chatId, { text: replyText });
+              if (sent?.key.id) botSentIds.add(sent.key.id);
+              await options.onOutboundSent?.({
+                tenantId: config.tenantId,
+                channel: 'whatsapp',
+                provider: 'baileys',
+                direction: 'outbound',
+                origin: 'bot',
+                messageId: sent?.key.id ?? `bot-${inbound.messageId}`,
+                chatId: inbound.chatId,
+                recipientPhone: inbound.senderPhone,
+                text: replyText,
+                sentAt: new Date()
+              });
+              void options.onAfterReply?.(inbound.chatId);
+            } catch (error) {
+              console.error('Gecikmeli bot cevabı hatası:', error instanceof Error ? error.message : error);
+            }
+          })();
+        }, graceMs);
       }
     }
   });
@@ -157,11 +178,14 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
   });
 
   sock.ev.on('contacts.upsert', (contacts) => {
+    let savedCount = 0;
     for (const c of contacts) {
       const saved = c.name || c.verifiedName;
+      if (saved) savedCount += 1;
       if (c.id && saved) void options.onContactName?.(c.id, saved, 'contact');
       if (c.id && c.notify) void options.onContactName?.(c.id, c.notify, 'push');
     }
+    if (savedCount > 0) console.log(`Rehber senkronu: ${savedCount} kayıtlı ad alındı`);
   });
 
   sock.ev.on('contacts.update', (updates) => {

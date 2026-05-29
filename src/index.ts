@@ -13,6 +13,9 @@ async function main(): Promise<void> {
   let autoReplyAudience: 'whitelist' | 'all' = config.autoReplyAudience;
   const savedAudience = await store.getAppState('auto_reply_audience');
   if (savedAudience === 'all' || savedAudience === 'whitelist') autoReplyAudience = savedAudience;
+  let botReplyDelayMs = 3 * 60 * 1000;
+  const savedDelay = await store.getAppState('bot_reply_delay_minutes');
+  if (savedDelay != null && savedDelay !== '' && Number.isFinite(Number(savedDelay))) botReplyDelayMs = Math.max(0, Number(savedDelay)) * 60 * 1000;
   const router = createRouter({
     tenantId: config.tenantId,
     whitelistPhones: config.whitelistPhones,
@@ -63,6 +66,15 @@ async function main(): Promise<void> {
     onContactName: (jid, name, source) => store.saveContactName(config.tenantId, jid, name, source),
     onMessageStatus: (messageId, status) => store.updateMessageStatus(config.tenantId, messageId, status),
     onAfterReply: (chatId) => applyReadReceipt(chatId, 'reply'),
+    getBotReplyDelayMs: () => botReplyDelayMs,
+    shouldStillReply: async (chatId, sinceIso) => {
+      const ctx = await store.getConversationReplyContext(config.tenantId, chatId);
+      if (ctx.botEnabled === false) return false;
+      const since = new Date(sinceIso).getTime();
+      if (ctx.lastManualReplyAt && ctx.lastManualReplyAt.getTime() > since) return false;
+      if (ctx.lastBotReplyAt && ctx.lastBotReplyAt.getTime() > since) return false;
+      return true;
+    },
     onHistorySync: async ({ imported, progress }) => {
       const raw = await store.getAppState('history_import');
       const current = raw ? JSON.parse(raw) as { imported?: number } : {};
@@ -101,6 +113,11 @@ async function main(): Promise<void> {
     markChatRead: (chatId, trigger) => applyReadReceipt(chatId, trigger),
     getWaStatus: () => ({ state: waState, me: waMe }),
     relinkWhatsApp: () => relinkWhatsApp(),
+    getReplyDelayMinutes: () => Math.round(botReplyDelayMs / 60000),
+    setReplyDelayMinutes: async (minutes) => {
+      botReplyDelayMs = Math.max(0, Math.min(120, Math.round(minutes))) * 60000;
+      await store.setAppState('bot_reply_delay_minutes', String(Math.round(botReplyDelayMs / 60000)));
+    },
     sendWhatsAppMessage: async (payload) => {
       const sent = payload.image
         ? await sock.sendMessage(payload.chatId, { image: payload.image, caption: payload.text || undefined })
