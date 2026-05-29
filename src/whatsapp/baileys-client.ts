@@ -136,7 +136,8 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
 
       const decision = await router.handleInbound(inbound);
       console.log(`Router kararı: chat=…${inbound.chatId.split('@')[0].slice(-4)} cevap=${decision.shouldReply} sebep=${decision.reason}`);
-      if (decision.shouldReply && decision.replyText) {
+      // Çift güvenlik: gruba (@g.us) hiçbir koşulda otomatik cevap gönderme.
+      if (decision.shouldReply && decision.replyText && !inbound.chatId.endsWith('@g.us')) {
         const replyText = decision.replyText;
         const sinceIso = inbound.receivedAt.toISOString();
         // Operatöre öncelik: bekleme süresi sonunda operatör araya girmediyse bot cevaplar.

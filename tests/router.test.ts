@@ -52,6 +52,26 @@ describe('message router safety policy', () => {
     expect(result.reason).toBe('sender_not_whitelisted');
   });
 
+  it('records but never auto-replies in groups (listen-only), even from whitelisted sender', async () => {
+    const saved: InboundMessage[] = [];
+    const router = createRouter({
+      tenantId: 'esmark-test',
+      whitelistPhones: ['905551112233'],
+      autoReply: true,
+      saveInbound: async (message) => { saved.push(message); }
+    });
+
+    const result = await router.handleInbound({
+      ...baseMessage,
+      chatId: '120363041112223334@g.us',
+      senderPhone: '905551112233'
+    });
+
+    expect(saved).toHaveLength(1);
+    expect(result.shouldReply).toBe(false);
+    expect(result.reason).toBe('group_listen_only');
+  });
+
   it('normalizes Turkish phone formats before whitelist comparison', async () => {
     const router = createRouter({
       tenantId: 'esmark-test',

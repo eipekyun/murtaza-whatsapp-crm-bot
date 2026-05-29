@@ -81,5 +81,6 @@ export interface RouterDecision {
     | 'auto_reply_disabled'
     | 'conversation_bot_disabled'
     | 'recent_bot_reply'
-    | 'recent_manual_reply';
+    | 'recent_manual_reply'
+    | 'group_listen_only';
 }

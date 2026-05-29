@@ -21,6 +21,11 @@ export function createRouter(options: RouterOptions): MessageRouter {
     async handleInbound(message: InboundMessage): Promise<RouterDecision> {
       await options.saveInbound(message);
 
+      // Gruplar (@g.us): sadece dinle ve kaydet, ASLA otomatik cevap verme.
+      if (message.chatId.endsWith('@g.us')) {
+        return { shouldReply: false, reason: 'group_listen_only' };
+      }
+
       if (!options.autoReply) {
         return { shouldReply: false, reason: 'auto_reply_disabled' };
       }
