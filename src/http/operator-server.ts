@@ -25,8 +25,8 @@ export interface OperatorServerOptions {
   markChatRead?: (chatId: string, trigger: 'open' | 'reply') => Promise<void> | void;
   getWaStatus?: () => { state: string; me?: string };
   relinkWhatsApp?: () => Promise<void> | void;
-  getReplyDelayMinutes?: () => number;
-  setReplyDelayMinutes?: (minutes: number) => Promise<void> | void;
+  getReplyDelaySeconds?: () => number;
+  setReplyDelaySeconds?: (seconds: number) => Promise<void> | void;
   sendWhatsAppMessage: (payload: WhatsAppSendPayload) => Promise<string | undefined>;
 }
 
@@ -60,7 +60,7 @@ export function createOperatorHttpServer(options: OperatorServerOptions): Server
         return sendJson(res, { messages: await options.store.listMessagesByChat(options.tenantId, chatId) });
       }
       if (req.method === 'GET' && parsed.pathname === '/api/settings') {
-        return sendJson(res, { autoReplyAudience: options.getAutoReplyAudience?.() ?? 'whitelist', replyDelayMinutes: options.getReplyDelayMinutes?.() ?? 3 });
+        return sendJson(res, { autoReplyAudience: options.getAutoReplyAudience?.() ?? 'whitelist', replyDelaySeconds: options.getReplyDelaySeconds?.() ?? 20 });
       }
       if (req.method === 'GET' && parsed.pathname === '/api/conversation-settings') {
         const chatId = parsed.searchParams.get('chatId');
@@ -95,12 +95,13 @@ export function createOperatorHttpServer(options: OperatorServerOptions): Server
       }
       if (req.method === 'POST' && parsed.pathname === '/api/settings') {
         const body = await readJson(req);
-        const audience = body.autoReplyAudience === 'all' ? 'all' : 'whitelist';
-        await options.setAutoReplyAudience?.(audience);
-        if (body.replyDelayMinutes !== undefined && Number.isFinite(Number(body.replyDelayMinutes))) {
-          await options.setReplyDelayMinutes?.(Number(body.replyDelayMinutes));
+        if (body.autoReplyAudience !== undefined) {
+          await options.setAutoReplyAudience?.(body.autoReplyAudience === 'all' ? 'all' : 'whitelist');
         }
-        return sendJson(res, { ok: true, autoReplyAudience: audience });
+        if (body.replyDelaySeconds !== undefined && Number.isFinite(Number(body.replyDelaySeconds))) {
+          await options.setReplyDelaySeconds?.(Number(body.replyDelaySeconds));
+        }
+        return sendJson(res, { ok: true });
       }
       if (req.method === 'GET' && parsed.pathname === '/api/history-import') {
         return sendJson(res, await getHistoryImportStatus(options.store));
@@ -416,11 +417,18 @@ body{margin:0;background:var(--bg);color:var(--text)}
           </select>
           <button id="saveAudience" class="btn primary">Kaydet</button>
         </div>
-        <div class="row" style="margin-top:8px">
-          <input id="replyDelay" type="number" min="0" max="120" style="flex:1;background:#2a3942;color:var(--text);border:0;border-radius:8px;padding:10px" />
-          <span class="sub" style="flex:0 0 auto">dk sonra bot cevaplar</span>
+        <p class="sub">Herkes seçilirse bot whitelist kontrolü yapmadan cevap verir.</p>
+      </div>
+
+      <div class="card">
+        <h3>Bot devreye girme süresi</h3>
+        <div class="row">
+          <input id="replyDelay" type="number" min="0" max="3600" style="flex:1;background:#2a3942;color:var(--text);border:0;border-radius:8px;padding:10px" />
+          <span class="sub" style="flex:0 0 auto">saniye</span>
+          <button id="saveDelay" class="btn primary">Kaydet</button>
         </div>
-        <p class="sub">Herkes seçilirse bot whitelist kontrolü yapmadan cevap verir. Bekleme: müşteri yazdıktan sonra bu süre içinde operatör cevap vermezse bot otomatik yazar. 0 = hemen.</p>
+        <span class="saveStatus" id="delaySaveStatus" style="display:block;margin-top:6px"></span>
+        <p class="sub">Müşteri yazdıktan sonra bu kadar saniye içinde sen cevap vermezsen bot otomatik yazar. 0 = hemen.</p>
       </div>
 
       <div class="card">
@@ -828,9 +836,20 @@ body{margin:0;background:var(--bg);color:var(--text)}
 
   $('saveAudience').onclick = async function(){
     var autoReplyAudience = $('audienceSelect').value;
-    var replyDelayMinutes = parseInt($('replyDelay').value, 10); if (isNaN(replyDelayMinutes) || replyDelayMinutes < 0) replyDelayMinutes = 0;
-    await api('/api/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ autoReplyAudience: autoReplyAudience, replyDelayMinutes: replyDelayMinutes }) });
-    alert('Kaydedildi (kapsam: ' + autoReplyAudience + ', bekleme: ' + replyDelayMinutes + ' dk)');
+    await api('/api/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ autoReplyAudience: autoReplyAudience }) });
+    alert('Kapsam kaydedildi: ' + autoReplyAudience);
+  };
+
+  $('saveDelay').onclick = async function(){
+    var sec = parseInt($('replyDelay').value, 10); if (isNaN(sec) || sec < 0) sec = 0; if (sec > 3600) sec = 3600;
+    var st = $('delaySaveStatus');
+    setSaveStatus(st, '', 'Kaydediliyor…');
+    try {
+      await api('/api/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ replyDelaySeconds: sec }) });
+      setSaveStatus(st, 'ok', '✓ ' + sec + ' sn olarak kaydedildi');
+    } catch (err) {
+      setSaveStatus(st, 'err', 'Hata: ' + err.message);
+    }
   };
 
   $('saveConvSettings').onclick = async function(){
@@ -854,7 +873,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
   async function loadSettings(){
     var s = await api('/api/settings');
     $('audienceSelect').value = s.autoReplyAudience || 'whitelist';
-    $('replyDelay').value = (s.replyDelayMinutes != null ? s.replyDelayMinutes : 3);
+    $('replyDelay').value = (s.replyDelaySeconds != null ? s.replyDelaySeconds : 20);
   }
   async function loadHistoryStatus(){
     var s = await api('/api/history-import');

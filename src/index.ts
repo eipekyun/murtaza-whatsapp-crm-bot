@@ -13,9 +13,9 @@ async function main(): Promise<void> {
   let autoReplyAudience: 'whitelist' | 'all' = config.autoReplyAudience;
   const savedAudience = await store.getAppState('auto_reply_audience');
   if (savedAudience === 'all' || savedAudience === 'whitelist') autoReplyAudience = savedAudience;
-  let botReplyDelayMs = 3 * 60 * 1000;
-  const savedDelay = await store.getAppState('bot_reply_delay_minutes');
-  if (savedDelay != null && savedDelay !== '' && Number.isFinite(Number(savedDelay))) botReplyDelayMs = Math.max(0, Number(savedDelay)) * 60 * 1000;
+  let botReplyDelayMs = 20 * 1000;
+  const savedDelay = await store.getAppState('bot_reply_delay_seconds');
+  if (savedDelay != null && savedDelay !== '' && Number.isFinite(Number(savedDelay))) botReplyDelayMs = Math.max(0, Number(savedDelay)) * 1000;
   const router = createRouter({
     tenantId: config.tenantId,
     whitelistPhones: config.whitelistPhones,
@@ -113,10 +113,10 @@ async function main(): Promise<void> {
     markChatRead: (chatId, trigger) => applyReadReceipt(chatId, trigger),
     getWaStatus: () => ({ state: waState, me: waMe }),
     relinkWhatsApp: () => relinkWhatsApp(),
-    getReplyDelayMinutes: () => Math.round(botReplyDelayMs / 60000),
-    setReplyDelayMinutes: async (minutes) => {
-      botReplyDelayMs = Math.max(0, Math.min(120, Math.round(minutes))) * 60000;
-      await store.setAppState('bot_reply_delay_minutes', String(Math.round(botReplyDelayMs / 60000)));
+    getReplyDelaySeconds: () => Math.round(botReplyDelayMs / 1000),
+    setReplyDelaySeconds: async (seconds) => {
+      botReplyDelayMs = Math.max(0, Math.min(3600, Math.round(seconds))) * 1000;
+      await store.setAppState('bot_reply_delay_seconds', String(Math.round(botReplyDelayMs / 1000)));
     },
     sendWhatsAppMessage: async (payload) => {
       const sent = payload.image
