@@ -10,6 +10,15 @@ import type { InboundMessage, OutboundMessage } from '../types.js';
 import { writeQrArtifacts } from './qr-artifacts.js';
 import { shouldReconnectAfterClose } from './reconnect-policy.js';
 
+type AltKey = proto.IMessageKey & { remoteJidAlt?: string; participantAlt?: string };
+
+// WhatsApp LID (@lid) adreslemesi aynı kişiyi telefon JID'sinden ayrı gösterir.
+// Baileys mesaj key'inde PN karşılığı remoteJidAlt/participantAlt olarak gelir;
+// @lid ise PN'i tercih ederek sohbetleri tek kişide birleştiririz.
+function preferPn(jid: string | null | undefined, alt: string | null | undefined): string | null | undefined {
+  return jid && jid.endsWith('@lid') && alt ? alt : jid;
+}
+
 export interface BaileysClientOptions {
   onOutboundSent?: (message: OutboundMessage) => Promise<void>;
   onHistorySync?: (chunk: { imported: number; progress?: number }) => Promise<void>;
@@ -150,10 +159,10 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
 }
 
 export function toOutboundFromSelf(config: RuntimeConfig, raw: proto.IWebMessageInfo): OutboundMessage | null {
-  const key = raw.key;
+  const key = raw.key as AltKey | null | undefined;
   if (!key || !key.fromMe) return null;
 
-  const chatId = key.remoteJid;
+  const chatId = preferPn(key.remoteJid, key.remoteJidAlt);
   const messageId = key.id;
   if (!chatId || !messageId) return null;
 
@@ -181,10 +190,10 @@ export function toOutboundFromSelf(config: RuntimeConfig, raw: proto.IWebMessage
 }
 
 export function toInboundMessage(config: RuntimeConfig, raw: proto.IWebMessageInfo): InboundMessage | null {
-  const key = raw.key;
+  const key = raw.key as AltKey | null | undefined;
   if (!key || key.fromMe) return null;
 
-  const chatId = key.remoteJid;
+  const chatId = preferPn(key.remoteJid, key.remoteJidAlt);
   const messageId = key.id;
   if (!chatId || !messageId) return null;
 
@@ -192,7 +201,7 @@ export function toInboundMessage(config: RuntimeConfig, raw: proto.IWebMessageIn
   const text = extractText(raw.message) || media?.fallbackText;
   if (!text && !media) return null;
 
-  const senderJid = key.participant || chatId;
+  const senderJid = preferPn(key.participant, key.participantAlt) || chatId;
   const senderPhone = senderJid.split('@')[0] ?? senderJid;
 
   return {
