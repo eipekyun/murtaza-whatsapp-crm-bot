@@ -20,6 +20,7 @@ export interface InboundMessage {
 
 export type OutboundOrigin = 'manual' | 'bot' | 'self';
 export type MediaKind = 'image' | 'document' | 'video' | 'audio' | 'sticker';
+export type ReadReceiptMode = 'on_reply' | 'on_open' | 'never';
 
 export interface OutboundMessage {
   tenantId: string;
@@ -35,6 +36,7 @@ export interface OutboundMessage {
   mediaName?: string;
   mediaMime?: string;
   mediaData?: string;
+  status?: number;
   sentAt: Date;
 }
 
@@ -44,11 +46,13 @@ export interface ConversationSettings {
   botEnabled: boolean;
   tags: string[];
   note?: string;
+  readReceipt: ReadReceiptMode;
 }
 
 export interface ConversationSummary {
   chatId: string;
   displayName: string;
+  pushName?: string;
   phone: string;
   latestText: string;
   latestAt: Date;

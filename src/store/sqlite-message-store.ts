@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
-import type { ConversationSettings, ConversationSummary, InboundMessage, OutboundMessage, StoredMessage } from '../types.js';
+import type { ConversationSettings, ConversationSummary, InboundMessage, OutboundMessage, ReadReceiptMode, StoredMessage } from '../types.js';
 import { normalizePhone, normalizeWhitelist } from '../phone.js';
 
 interface MessageRow {
@@ -20,11 +20,13 @@ interface MessageRow {
   media_mime: string | null;
   media_data: string | null;
   received_at: string;
+  status: number | null;
 }
 
 interface ConversationRow {
   chat_id: string;
   display_name: string | null;
+  push_name: string | null;
   phone: string;
   latest_text: string;
   latest_at: string;
@@ -35,10 +37,13 @@ export interface MessageStore {
   saveInbound(message: InboundMessage): Promise<void>;
   saveOutbound(message: OutboundMessage): Promise<void>;
   saveContactName(tenantId: string, jid: string, name: string, source?: string): Promise<void>;
+  updateMessageStatus(tenantId: string, messageId: string, status: number): Promise<void>;
+  markChatRead(tenantId: string, chatId: string): Promise<void>;
+  getUnreadInboundKeys(tenantId: string, chatId: string): Promise<Array<{ chatId: string; messageId: string; senderPhone: string }>>;
   listMessages(tenantId: string): Promise<InboundMessage[]>;
   listMessagesByChat(tenantId: string, chatId: string): Promise<StoredMessage[]>;
   listConversations(tenantId: string): Promise<ConversationSummary[]>;
-  getConversationReplyContext(tenantId: string, chatId: string): Promise<{ lastBotReplyAt?: Date; lastManualReplyAt?: Date; botEnabled?: boolean }>;
+  getConversationReplyContext(tenantId: string, chatId: string): Promise<{ lastBotReplyAt?: Date; lastManualReplyAt?: Date; botEnabled?: boolean; readReceiptMode?: ReadReceiptMode }>;
   getConversationSettings(tenantId: string, chatId: string): Promise<ConversationSettings>;
   setConversationSettings(tenantId: string, chatId: string, patch: Partial<ConversationSettings>): Promise<ConversationSettings>;
   hasWhitelistedAlias(tenantId: string, displayName: string, whitelistPhones: string[]): Promise<boolean>;
@@ -99,17 +104,19 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
   ensureColumn(db, 'messages', 'media_name', 'TEXT');
   ensureColumn(db, 'messages', 'media_mime', 'TEXT');
   ensureColumn(db, 'messages', 'media_data', 'TEXT');
+  ensureColumn(db, 'messages', 'status', 'INTEGER');
+  ensureColumn(db, 'contact_names', 'push_name', 'TEXT');
 
-  const insert = db.prepare<[string, string, string, string, string | null, string, string, string, string | null, string, string | null, string | null, string | null, string | null, string]>(`
+  const insert = db.prepare<[string, string, string, string, string | null, string, string, string, string | null, string, string | null, string | null, string | null, string | null, string, number | null]>(`
     INSERT OR IGNORE INTO messages (
       tenant_id, channel, provider, direction, origin, message_id, chat_id,
-      sender_phone, sender_display_name, text, media_kind, media_name, media_mime, media_data, received_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      sender_phone, sender_display_name, text, media_kind, media_name, media_mime, media_data, received_at, status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const selectColumns = `
     SELECT tenant_id, channel, provider, direction, origin, message_id, chat_id,
-           sender_phone, sender_display_name, text, media_kind, media_name, media_mime, media_data, received_at
+           sender_phone, sender_display_name, text, media_kind, media_name, media_mime, media_data, received_at, status
     FROM messages
   `;
 
@@ -118,7 +125,25 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
     VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(tenant_id, jid) DO UPDATE SET
       name = excluded.name, source = excluded.source, updated_at = excluded.updated_at
-    WHERE NOT (contact_names.source IN ('contact', 'group') AND excluded.source = 'push')
+  `);
+
+  const upsertPushName = db.prepare<[string, string, string, string]>(`
+    INSERT INTO contact_names (tenant_id, jid, name, push_name, updated_at)
+    VALUES (?, ?, '', ?, ?)
+    ON CONFLICT(tenant_id, jid) DO UPDATE SET
+      push_name = excluded.push_name, updated_at = excluded.updated_at
+  `);
+
+  const updateStatusStmt = db.prepare<[number, string, string, number]>(`
+    UPDATE messages SET status = ?
+    WHERE tenant_id = ? AND message_id = ? AND (status IS NULL OR status < ?)
+  `);
+
+  const unreadKeysStmt = db.prepare<[string, string, string], { chat_id: string; message_id: string; sender_phone: string }>(`
+    SELECT chat_id, message_id, sender_phone
+    FROM messages
+    WHERE tenant_id = ? AND chat_id = ? AND direction = 'inbound'
+      AND received_at > COALESCE((SELECT value FROM app_state WHERE key = ?), '')
   `);
 
   const getState = db.prepare<[string], { value: string }>('SELECT value FROM app_state WHERE key = ?');
@@ -190,11 +215,18 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
       SELECT identity_key, COUNT(*) AS unread_count
       FROM enriched
       WHERE direction = 'inbound'
+        AND received_at > COALESCE((SELECT value FROM app_state a WHERE a.key = 'last_read:' || enriched.tenant_id || ':' || enriched.chat_id), '')
       GROUP BY identity_key
     )
     SELECT
       latest.chat_id,
-      COALESCE(NULLIF(cn.name, ''), NULLIF(latest.identity_display_name, ''), NULLIF(latest.sender_display_name, ''), NULLIF(group_phones.phone, ''), NULLIF(latest.sender_phone, ''), latest.chat_id) AS display_name,
+      COALESCE(
+        NULLIF(cn.name, ''),
+        CASE WHEN COALESCE(NULLIF(cn.push_name, ''), NULLIF(latest.identity_display_name, ''), NULLIF(latest.sender_display_name, '')) != ''
+             THEN '~' || COALESCE(NULLIF(cn.push_name, ''), NULLIF(latest.identity_display_name, ''), NULLIF(latest.sender_display_name, '')) END,
+        NULLIF(group_phones.phone, ''), NULLIF(latest.sender_phone, ''), latest.chat_id
+      ) AS display_name,
+      COALESCE(NULLIF(cn.push_name, ''), NULLIF(latest.identity_display_name, ''), NULLIF(latest.sender_display_name, '')) AS push_name,
       COALESCE(NULLIF(group_phones.phone, ''), NULLIF(latest.sender_phone, ''), replace(latest.chat_id, '@s.whatsapp.net', '')) AS phone,
       latest.text AS latest_text,
       latest.received_at AS latest_at,
@@ -239,7 +271,8 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
         message.mediaName ?? null,
         message.mediaMime ?? null,
         message.mediaData ?? null,
-        message.receivedAt.toISOString()
+        message.receivedAt.toISOString(),
+        null
       );
     },
 
@@ -259,8 +292,25 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
         message.mediaName ?? null,
         message.mediaMime ?? null,
         message.mediaData ?? null,
-        message.sentAt.toISOString()
+        message.sentAt.toISOString(),
+        message.status ?? 2
       );
+    },
+
+    async updateMessageStatus(tenantId: string, messageId: string, status: number): Promise<void> {
+      if (!messageId || !Number.isFinite(status)) return;
+      updateStatusStmt.run(status, tenantId, messageId, status);
+    },
+
+    async markChatRead(tenantId: string, chatId: string): Promise<void> {
+      if (!chatId) return;
+      const now = new Date().toISOString();
+      setState.run(lastReadKey(tenantId, chatId), now, now);
+    },
+
+    async getUnreadInboundKeys(tenantId: string, chatId: string): Promise<Array<{ chatId: string; messageId: string; senderPhone: string }>> {
+      return unreadKeysStmt.all(tenantId, chatId, lastReadKey(tenantId, chatId))
+        .map((r) => ({ chatId: r.chat_id, messageId: r.message_id, senderPhone: r.sender_phone }));
     },
 
     async listMessages(tenantId: string): Promise<InboundMessage[]> {
@@ -274,7 +324,12 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
     async saveContactName(tenantId: string, jid: string, name: string, source?: string): Promise<void> {
       const clean = (name ?? '').trim();
       if (!clean || !jid) return;
-      upsertContactName.run(tenantId, jid, clean.slice(0, 120), source ?? null, new Date().toISOString());
+      const now = new Date().toISOString();
+      if (source === 'push') {
+        upsertPushName.run(tenantId, jid, clean.slice(0, 120), now);
+      } else {
+        upsertContactName.run(tenantId, jid, clean.slice(0, 120), source ?? null, now);
+      }
     },
 
     async listConversations(tenantId: string): Promise<ConversationSummary[]> {
@@ -283,6 +338,7 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
         return {
           chatId: row.chat_id,
           displayName: row.display_name ?? row.phone,
+          pushName: row.push_name ?? undefined,
           phone: row.phone,
           latestText: row.latest_text,
           latestAt: new Date(row.latest_at),
@@ -292,13 +348,14 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
       });
     },
 
-    async getConversationReplyContext(tenantId: string, chatId: string): Promise<{ lastBotReplyAt?: Date; lastManualReplyAt?: Date; botEnabled?: boolean }> {
+    async getConversationReplyContext(tenantId: string, chatId: string): Promise<{ lastBotReplyAt?: Date; lastManualReplyAt?: Date; botEnabled?: boolean; readReceiptMode?: ReadReceiptMode }> {
       const row = (replyContext as unknown as { get: (tenantId: string, chatId: string) => { last_bot_reply_at: string | null; last_manual_reply_at: string | null } | undefined }).get(tenantId, chatId);
       const settings = readConversationSettings(stateReader, tenantId, chatId);
       return {
         lastBotReplyAt: row?.last_bot_reply_at ? new Date(row.last_bot_reply_at) : undefined,
         lastManualReplyAt: row?.last_manual_reply_at ? new Date(row.last_manual_reply_at) : undefined,
-        botEnabled: settings.botEnabled
+        botEnabled: settings.botEnabled,
+        readReceiptMode: settings.readReceipt
       };
     },
 
@@ -311,7 +368,8 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
       const next: ConversationSettings = {
         botEnabled: patch.botEnabled ?? current.botEnabled,
         tags: Array.isArray(patch.tags) ? patch.tags.map(String).map((tag) => tag.trim()).filter(Boolean).slice(0, 12) : current.tags,
-        note: typeof patch.note === 'string' ? patch.note.trim().slice(0, 1000) : current.note
+        note: typeof patch.note === 'string' ? patch.note.trim().slice(0, 1000) : current.note,
+        readReceipt: patch.readReceipt ?? current.readReceipt
       };
       setState.run(conversationSettingsKey(tenantId, chatId), JSON.stringify(next), new Date().toISOString());
       return next;
@@ -342,8 +400,12 @@ function conversationSettingsKey(tenantId: string, chatId: string): string {
   return `conversation_settings:${tenantId}:${chatId}`;
 }
 
+function lastReadKey(tenantId: string, chatId: string): string {
+  return `last_read:${tenantId}:${chatId}`;
+}
+
 function readConversationSettings(getState: { get: (key: string) => { value: string } | undefined }, tenantId: string, chatId: string): ConversationSettings {
-  const fallback: ConversationSettings = { botEnabled: true, tags: [] };
+  const fallback: ConversationSettings = { botEnabled: true, tags: [], readReceipt: 'on_reply' };
   const raw = getState.get(conversationSettingsKey(tenantId, chatId))?.value;
   if (!raw) return fallback;
   try {
@@ -351,7 +413,8 @@ function readConversationSettings(getState: { get: (key: string) => { value: str
     return {
       botEnabled: parsed.botEnabled !== false,
       tags: Array.isArray(parsed.tags) ? parsed.tags.map(String).filter(Boolean) : [],
-      note: typeof parsed.note === 'string' && parsed.note ? parsed.note : undefined
+      note: typeof parsed.note === 'string' && parsed.note ? parsed.note : undefined,
+      readReceipt: parsed.readReceipt === 'on_open' || parsed.readReceipt === 'never' ? parsed.readReceipt : 'on_reply'
     };
   } catch {
     return fallback;
@@ -381,6 +444,7 @@ function rowToStoredMessage(row: MessageRow): StoredMessage {
       mediaName: row.media_name ?? undefined,
       mediaMime: row.media_mime ?? undefined,
       mediaData: row.media_data ?? undefined,
+      status: row.status ?? undefined,
       sentAt: new Date(row.received_at)
     };
   }

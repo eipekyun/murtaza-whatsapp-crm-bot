@@ -24,6 +24,9 @@ export interface BaileysClientOptions {
   onHistorySync?: (chunk: { imported: number; progress?: number }) => Promise<void>;
   onSocketReady?: (sock: WASocket) => void;
   onContactName?: (jid: string, name: string, source?: string) => Promise<void> | void;
+  onMessageStatus?: (messageId: string, status: number) => Promise<void> | void;
+  onAfterReply?: (chatId: string) => Promise<void> | void;
+  onConnectionState?: (state: string, me?: string) => void;
 }
 
 export async function startBaileysClient(config: RuntimeConfig, router: MessageRouter, options: BaileysClientOptions = {}): Promise<WASocket> {
@@ -55,8 +58,9 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
 
   sock.ev.on('messaging-history.set', async ({ messages, contacts, chats, progress }) => {
     for (const c of contacts ?? []) {
-      const name = c.name || c.notify || c.verifiedName;
-      if (c.id && name) void options.onContactName?.(c.id, name, 'contact');
+      const saved = c.name || c.verifiedName;
+      if (c.id && saved) void options.onContactName?.(c.id, saved, 'contact');
+      if (c.id && c.notify) void options.onContactName?.(c.id, c.notify, 'push');
     }
     for (const ch of chats ?? []) {
       if (ch.id && ch.name && ch.id.endsWith('@g.us')) void options.onContactName?.(ch.id, ch.name, 'group');
@@ -80,6 +84,8 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
   });
 
   sock.ev.on('connection.update', (update) => {
+    if (update.qr) options.onConnectionState?.('qr');
+    else if (update.connection) options.onConnectionState?.(update.connection, sock.user?.id ?? undefined);
     if (update.qr) {
       void writeQrArtifacts(update.qr).then((artifacts) => {
         console.log('\nWhatsApp QR hazır. Telefondan WhatsApp Business > Bağlı Cihazlar > Cihaz Bağla ile okut.');
@@ -137,21 +143,32 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
           text: decision.replyText,
           sentAt: new Date()
         });
+        void options.onAfterReply?.(inbound.chatId);
       }
+    }
+  });
+
+  sock.ev.on('messages.update', (updates) => {
+    for (const u of updates) {
+      const id = u.key?.id;
+      const status = u.update?.status;
+      if (id && typeof status === 'number') void options.onMessageStatus?.(id, status);
     }
   });
 
   sock.ev.on('contacts.upsert', (contacts) => {
     for (const c of contacts) {
-      const name = c.name || c.notify || c.verifiedName;
-      if (c.id && name) void options.onContactName?.(c.id, name, 'contact');
+      const saved = c.name || c.verifiedName;
+      if (c.id && saved) void options.onContactName?.(c.id, saved, 'contact');
+      if (c.id && c.notify) void options.onContactName?.(c.id, c.notify, 'push');
     }
   });
 
   sock.ev.on('contacts.update', (updates) => {
     for (const c of updates) {
-      const name = c.name || c.notify || c.verifiedName;
-      if (c.id && name) void options.onContactName?.(c.id, name, 'contact');
+      const saved = c.name || c.verifiedName;
+      if (c.id && saved) void options.onContactName?.(c.id, saved, 'contact');
+      if (c.id && c.notify) void options.onContactName?.(c.id, c.notify, 'push');
     }
   });
 

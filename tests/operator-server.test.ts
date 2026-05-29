@@ -23,18 +23,22 @@ interface FakeStoreOptions {
 
 function fakeStore(saved: OutboundMessage[] = [], opts: FakeStoreOptions = {}): MessageStore {
   const state = new Map<string, string>();
-  const settings = new Map<string, { botEnabled: boolean; tags: string[]; note?: string }>();
+  const settings = new Map<string, { botEnabled: boolean; tags: string[]; note?: string; readReceipt: 'on_reply' | 'on_open' | 'never' }>();
   return {
     saveInbound: async () => {},
     saveOutbound: async (message: OutboundMessage) => { saved.push(message); },
     saveContactName: async () => {},
+    updateMessageStatus: async () => {},
+    markChatRead: async () => {},
+    getUnreadInboundKeys: async () => [],
     listMessages: async () => [],
     listConversations: async () => opts.conversations ?? [],
     listMessagesByChat: async () => [],
     getConversationReplyContext: async () => ({}),
-    getConversationSettings: async (_tenantId: string, chatId: string) => settings.get(chatId) ?? { botEnabled: true, tags: [] },
+    getConversationSettings: async (_tenantId: string, chatId: string) => settings.get(chatId) ?? { botEnabled: true, tags: [], readReceipt: 'on_reply' },
     setConversationSettings: async (_tenantId: string, chatId: string, patch) => {
-      const next = { ...(settings.get(chatId) ?? { botEnabled: true, tags: [] }), ...patch };
+      const base = settings.get(chatId) ?? { botEnabled: true, tags: [] as string[], readReceipt: 'on_reply' as const };
+      const next = { ...base, ...patch, readReceipt: patch.readReceipt ?? base.readReceipt };
       settings.set(chatId, next);
       return next;
     },
@@ -152,7 +156,7 @@ describe('operator HTTP API', () => {
           latestText: 'Slm',
           latestAt: new Date('2026-05-13T10:35:38.000Z'),
           unreadCount: 2,
-          settings: { botEnabled: false, tags: ['sıcak lead'], note: 'LID/JID birleşmiş' }
+          settings: { botEnabled: false, tags: ['sıcak lead'], note: 'LID/JID birleşmiş', readReceipt: 'on_reply' }
         }
       ]
     });

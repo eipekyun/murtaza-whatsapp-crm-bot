@@ -22,6 +22,9 @@ export interface OperatorServerOptions {
   noAuth?: boolean;
   getAutoReplyAudience?: () => 'whitelist' | 'all';
   setAutoReplyAudience?: (audience: 'whitelist' | 'all') => Promise<void> | void;
+  markChatRead?: (chatId: string, trigger: 'open' | 'reply') => Promise<void> | void;
+  getWaStatus?: () => { state: string; me?: string };
+  relinkWhatsApp?: () => Promise<void> | void;
   sendWhatsAppMessage: (payload: WhatsAppSendPayload) => Promise<string | undefined>;
 }
 
@@ -69,9 +72,24 @@ export function createOperatorHttpServer(options: OperatorServerOptions): Server
         const settings = await options.store.setConversationSettings(options.tenantId, chatId, {
           botEnabled: typeof body.botEnabled === 'boolean' ? body.botEnabled : undefined,
           tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
-          note: typeof body.note === 'string' ? body.note : undefined
+          note: typeof body.note === 'string' ? body.note : undefined,
+          readReceipt: (body.readReceipt === 'on_reply' || body.readReceipt === 'on_open' || body.readReceipt === 'never') ? body.readReceipt : undefined
         });
         return sendJson(res, { ok: true, settings });
+      }
+      if (req.method === 'POST' && parsed.pathname === '/api/mark-read') {
+        const body = await readJson(req);
+        const chatId = String(body.chatId ?? '').trim();
+        if (!chatId) return sendJson(res, { error: 'chatId_required' }, 400);
+        await options.markChatRead?.(chatId, 'open');
+        return sendJson(res, { ok: true });
+      }
+      if (req.method === 'GET' && parsed.pathname === '/api/wa-status') {
+        return sendJson(res, options.getWaStatus ? options.getWaStatus() : { state: 'unknown' });
+      }
+      if (req.method === 'POST' && parsed.pathname === '/api/wa-relink') {
+        await options.relinkWhatsApp?.();
+        return sendJson(res, { ok: true });
       }
       if (req.method === 'POST' && parsed.pathname === '/api/settings') {
         const body = await readJson(req);
@@ -141,6 +159,7 @@ export function createOperatorHttpServer(options: OperatorServerOptions): Server
           mediaData,
           sentAt: new Date()
         });
+        await options.markChatRead?.(chatId, 'reply');
         return sendJson(res, { ok: true, messageId });
       }
       return sendJson(res, { error: 'not_found' }, 404);
@@ -252,6 +271,9 @@ body{margin:0;background:var(--bg);color:var(--text)}
 .last{color:#aebac1;font-size:13px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .time{font-size:11px;color:var(--muted)}
 .badge{display:inline-block;min-width:18px;padding:0 6px;border-radius:9px;background:var(--green);color:#041410;font-size:11px;font-weight:800;text-align:center}
+.name.unread{font-weight:800;color:var(--text)}
+.tick{font-size:11px;margin-left:4px}
+.tick.read{color:#53bdeb}
 
 .chat{display:flex;flex-direction:column;height:100%;overflow:hidden}
 .chatHead{flex:0 0 64px;cursor:pointer}
@@ -318,8 +340,9 @@ body{margin:0;background:var(--bg);color:var(--text)}
   <aside class="left">
     <div class="bar">
       <div class="avatar">M</div>
-      <div><div class="brand">MURTAZA</div><div class="sub">WhatsApp Operatör</div></div>
+      <div><div class="brand">MURTAZA</div><div class="sub" id="waStatusText">bağlantı kontrol ediliyor…</div></div>
       <div class="spacer"></div>
+      <button class="icon" id="connBtn" title="WhatsApp bağlantısı / QR">🔌</button>
       <button class="icon" id="settingsBtn" title="Ayarlar">⚙</button>
     </div>
     <div class="search"><input id="search" placeholder="Ara veya yeni sohbet başlat" /></div>
@@ -367,6 +390,12 @@ body{margin:0;background:var(--bg);color:var(--text)}
         </label>
         <input id="convTags" placeholder="Etiketler: sıcak lead, web" style="width:100%;margin:6px 0;background:#2a3942;color:var(--text);border:0;border-radius:8px;padding:10px" />
         <textarea id="convNote" rows="3" placeholder="Operatör notu" style="width:100%;resize:vertical;background:#2a3942;color:var(--text);border:0;border-radius:8px;padding:10px"></textarea>
+        <label class="sub" style="display:block;margin-top:8px">Okundu makbuzu (mavi tik)</label>
+        <select id="convReadReceipt" style="width:100%;margin:4px 0;background:#2a3942;color:var(--text);border:0;border-radius:8px;padding:10px">
+          <option value="on_reply">Cevap verince gönder (varsayılan)</option>
+          <option value="on_open">Açınca gönder</option>
+          <option value="never">Hiç gönderme</option>
+        </select>
         <div style="display:flex;align-items:center;margin-top:8px">
           <button id="saveConvSettings" class="btn primary">Konuşma ayarını kaydet</button>
           <span class="saveStatus" id="convSaveStatus"></span>
@@ -430,6 +459,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
     </div>
     <div class="detailHero"><div class="avatar" id="detailAvatar">?</div><div><div class="brand" id="detailName">—</div><div class="sub" id="detailPhone">—</div></div></div>
     <div class="notice">LID ve telefon JID kayıtları aynı kişi adıyla eşleşirse bu panelde tek konuşma olarak birleştirilir. Aşağıda en güncel chat kimliği gösterilir.</div>
+    <div class="detailRow"><div class="k">WhatsApp adı</div><div class="v" id="detailPushName">—</div></div>
     <div class="detailRow"><div class="k">Chat ID</div><div class="v" id="detailChatId">—</div></div>
     <div class="detailRow"><div class="k">Son mesaj</div><div class="v" id="detailLatest">—</div></div>
     <div class="detailRow"><div class="k">Son zaman</div><div class="v" id="detailLatestAt">—</div></div>
@@ -437,6 +467,18 @@ body{margin:0;background:var(--bg);color:var(--text)}
     <div class="detailRow"><div class="k">Bot durumu</div><div class="v" id="detailBot">—</div></div>
     <div class="detailRow"><div class="k">Etiketler</div><div class="v" id="detailTags">—</div></div>
     <div class="detailRow"><div class="k">Not</div><div class="v" id="detailNote">—</div></div>
+  </div>
+</div>
+
+<div class="modalBg" id="connModal">
+  <div class="modal" style="text-align:center">
+    <div class="bar" style="margin:-18px -18px 12px -18px;border-radius:16px 16px 0 0">
+      <b>WhatsApp Bağlantısı</b><div class="spacer"></div><button class="icon" id="closeConn">×</button>
+    </div>
+    <div id="connStatus" class="sub" style="margin-bottom:10px">—</div>
+    <img id="connQr" alt="" style="width:300px;height:300px;background:#fff;padding:12px;border-radius:12px;display:none;margin:0 auto" />
+    <div id="connHint" class="sub" style="margin-top:10px"></div>
+    <button id="relinkBtn" class="btn primary" style="margin-top:12px">Yeni QR oluştur</button>
   </div>
 </div>
 
@@ -521,6 +563,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
       el.innerHTML = '<div class="avatar"></div><div class="meta"><div class="name"></div><div class="last"></div></div><div style="text-align:right"><div class="time"></div><div class="badgeWrap"></div></div>';
       el.querySelector('.avatar').textContent = initials(c.displayName || c.phone);
       el.querySelector('.name').textContent = c.displayName || c.phone;
+      if (c.unreadCount && c.unreadCount > 0) el.querySelector('.name').classList.add('unread');
       el.querySelector('.last').textContent = c.latestText || '';
       el.querySelector('.time').textContent = fmtTime(c.latestAt);
       if (c.unreadCount && c.unreadCount > 0) {
@@ -530,12 +573,13 @@ body{margin:0;background:var(--bg);color:var(--text)}
         el.querySelector('.badgeWrap').appendChild(b);
       }
       (function(conv){
-        el.onclick = function(){
+        el.onclick = async function(){
           selectedChatId = conv.chatId;
           selectedConversation = conv;
           $('chatTitle').textContent = conv.displayName || conv.phone;
           $('chatAvatar').textContent = initials(conv.displayName || conv.phone);
           $('chatSub').innerHTML = '<span class="statusDot"></span> ' + (conv.phone || conv.chatId);
+          try { await api('/api/mark-read', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: conv.chatId }) }); } catch(e){}
           loadMessages(true);
           loadConversationSettings();
           loadConversations();
@@ -556,6 +600,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
     $('convBotEnabled').checked = settings.botEnabled !== false;
     $('convTags').value = (settings.tags || []).join(', ');
     $('convNote').value = settings.note || '';
+    $('convReadReceipt').value = settings.readReceipt || 'on_reply';
     var tagText = (settings.tags || []).join(', ') || 'etiket yok';
     $('convSettingsStatus').textContent = (settings.botEnabled === false ? 'Bot kapalı' : 'Bot açık') + ' · ' + tagText;
     if (selectedConversation) {
@@ -610,6 +655,14 @@ body{margin:0;background:var(--bg);color:var(--text)}
       var when = m.receivedAt || m.sentAt;
       if (when) {
         var t = document.createElement('span'); t.className='time'; t.textContent = fmtTime(when);
+        if (m.direction === 'outbound' && typeof m.status === 'number') {
+          var tick = document.createElement('span');
+          tick.className = 'tick' + (m.status >= 4 ? ' read' : '');
+          tick.textContent = m.status >= 3 ? '✓✓' : (m.status >= 2 ? '✓' : '·');
+          tick.title = m.status >= 4 ? 'Okundu' : (m.status >= 3 ? 'İletildi' : (m.status >= 2 ? 'Gönderildi' : 'Bekliyor'));
+          t.appendChild(document.createTextNode(' '));
+          t.appendChild(tick);
+        }
         el.appendChild(t);
       }
       root.appendChild(el);
@@ -695,6 +748,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
     $('detailAvatar').textContent = initials(c.displayName || c.phone);
     $('detailName').textContent = c.displayName || c.phone || '—';
     $('detailPhone').textContent = c.phone || '—';
+    $('detailPushName').textContent = c.pushName || '—';
     $('detailChatId').textContent = c.chatId || '—';
     $('detailLatest').textContent = c.latestText || '—';
     $('detailLatestAt').textContent = c.latestAt ? fmtDateTime(c.latestAt) : '—';
@@ -774,10 +828,11 @@ body{margin:0;background:var(--bg);color:var(--text)}
     var tags = $('convTags').value.split(',').map(function(x){ return x.trim(); }).filter(Boolean);
     var note = $('convNote').value;
     var botEnabled = $('convBotEnabled').checked;
+    var readReceipt = $('convReadReceipt').value;
     var status = $('convSaveStatus');
     setSaveStatus(status, '', 'Kaydediliyor…');
     try {
-      await api('/api/conversation-settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: selectedChatId, botEnabled: botEnabled, tags: tags, note: note }) });
+      await api('/api/conversation-settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: selectedChatId, botEnabled: botEnabled, tags: tags, note: note, readReceipt: readReceipt }) });
       setSaveStatus(status, 'ok', 'Kaydedildi');
     } catch (err) {
       setSaveStatus(status, 'err', 'Hata: ' + err.message);
@@ -823,13 +878,41 @@ body{margin:0;background:var(--bg);color:var(--text)}
   };
   $('search').oninput = loadConversations;
 
+  function waStatusLabel(s){
+    if (!s) return 'bağlantı bilinmiyor';
+    if (s.state === 'open') return 'Bağlı' + (s.me ? ' · ' + s.me : '');
+    if (s.state === 'qr') return 'QR bekleniyor — okut';
+    if (s.state === 'connecting') return 'Bağlanıyor…';
+    return 'Bağlı değil';
+  }
+  async function refreshConn(){
+    var s; try { s = await api('/api/wa-status'); } catch(e){ s = { state: 'unknown' }; }
+    $('connStatus').textContent = 'Durum: ' + waStatusLabel(s);
+    var qr = $('connQr');
+    if (s.state === 'qr') { qr.src = '/qr.png?t=' + Date.now(); qr.style.display = 'block'; $('connHint').textContent = 'Telefondan WhatsApp > Bağlı Cihazlar > Cihaz Bağla ile bu QR kodunu okut.'; }
+    else if (s.state === 'open') { qr.style.display = 'none'; $('connHint').textContent = 'Bağlı. İşlem gerekmez.'; }
+    else { qr.style.display = 'none'; $('connHint').textContent = 'Bağlı değil. "Yeni QR oluştur" ile QR üret ve okut.'; }
+  }
+  async function pollWaStatus(){
+    try { var s = await api('/api/wa-status'); $('waStatusText').textContent = waStatusLabel(s); if ($('connModal').classList.contains('open')) refreshConn(); } catch(e){}
+  }
+  $('connBtn').onclick = function(){ $('connModal').classList.add('open'); refreshConn(); };
+  $('closeConn').onclick = function(){ $('connModal').classList.remove('open'); };
+  $('relinkBtn').onclick = async function(){
+    $('connHint').textContent = 'QR oluşturuluyor…';
+    try { await api('/api/wa-relink', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); } catch(e){}
+    setTimeout(refreshConn, 1800);
+  };
+
   buildQuickReplies();
   buildEmojiPicker();
   loadConversations();
   loadWhitelist();
   loadSettings();
   loadHistoryStatus();
+  pollWaStatus();
   setInterval(function(){ loadConversations(); loadMessages(); loadHistoryStatus(); }, 3000);
+  setInterval(pollWaStatus, 4000);
 })();
 </script>
 </body>

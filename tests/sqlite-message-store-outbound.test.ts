@@ -30,11 +30,12 @@ describe('sqlite message store outbound/operator views', () => {
         {
           chatId: '905322013401@s.whatsapp.net',
           displayName: '905322013401',
+          pushName: undefined,
           phone: '905322013401',
           latestText: 'Operatör cevabı',
           latestAt: new Date('2026-05-12T17:00:00.000Z'),
           unreadCount: 0,
-          settings: { botEnabled: true, tags: [] }
+          settings: { botEnabled: true, tags: [], readReceipt: 'on_reply' }
         }
       ]);
 
@@ -99,7 +100,7 @@ describe('sqlite message store outbound/operator views', () => {
       expect(conversations).toHaveLength(1);
       expect(conversations[0]).toMatchObject({
         chatId: '29132796747799@lid',
-        displayName: 'Ersin',
+        displayName: '~Ersin',
         latestText: 'Slm',
         unreadCount: 2
       });
