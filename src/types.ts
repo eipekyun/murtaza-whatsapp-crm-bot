@@ -18,7 +18,7 @@ export interface InboundMessage {
   receivedAt: Date;
 }
 
-export type OutboundOrigin = 'manual' | 'bot';
+export type OutboundOrigin = 'manual' | 'bot' | 'self';
 export type MediaKind = 'image' | 'document' | 'video' | 'audio' | 'sticker';
 
 export interface OutboundMessage {

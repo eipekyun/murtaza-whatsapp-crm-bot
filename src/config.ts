@@ -12,6 +12,8 @@ export interface RuntimeConfig {
   autoReplyAudience: 'whitelist' | 'all';
   operatorPort: number;
   operatorToken: string;
+  operatorHost: string;
+  operatorNoAuth: boolean;
 }
 
 type Env = Record<string, string | undefined>;
@@ -27,7 +29,9 @@ export function loadConfigFromEnv(env: Env = process.env): RuntimeConfig {
     autoReply: env.BOT_AUTO_REPLY === 'true',
     autoReplyAudience: env.BOT_AUTO_REPLY_AUDIENCE === 'all' ? 'all' : 'whitelist',
     operatorPort: Number(env.BOT_OPERATOR_PORT ?? '8787'),
-    operatorToken: resolveOperatorToken(env, dbPath)
+    operatorToken: resolveOperatorToken(env, dbPath),
+    operatorHost: env.BOT_OPERATOR_HOST?.trim() || '127.0.0.1',
+    operatorNoAuth: env.BOT_OPERATOR_NO_AUTH === 'true'
   };
 }
 

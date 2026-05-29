@@ -27,6 +27,7 @@ function fakeStore(saved: OutboundMessage[] = [], opts: FakeStoreOptions = {}): 
   return {
     saveInbound: async () => {},
     saveOutbound: async (message: OutboundMessage) => { saved.push(message); },
+    saveContactName: async () => {},
     listMessages: async () => [],
     listConversations: async () => opts.conversations ?? [],
     listMessagesByChat: async () => [],

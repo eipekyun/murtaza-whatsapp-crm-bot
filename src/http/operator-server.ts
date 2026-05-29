@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import type { MessageStore } from '../store/sqlite-message-store.js';
 import { normalizePhone } from '../phone.js';
 
@@ -18,22 +19,33 @@ export interface OperatorServerOptions {
   store: MessageStore;
   whitelistPhones: string[];
   authToken: string;
+  noAuth?: boolean;
   getAutoReplyAudience?: () => 'whitelist' | 'all';
   setAutoReplyAudience?: (audience: 'whitelist' | 'all') => Promise<void> | void;
   sendWhatsAppMessage: (payload: WhatsAppSendPayload) => Promise<string | undefined>;
 }
 
 export function createOperatorHttpServer(options: OperatorServerOptions): Server {
-  if (!options.authToken || options.authToken.length < 16) {
+  if (!options.noAuth && (!options.authToken || options.authToken.length < 16)) {
     throw new Error('operator authToken missing or too short (min 16 chars)');
   }
   return createServer(async (req, res) => {
     try {
       const parsed = new URL(req.url ?? '/', 'http://127.0.0.1');
 
-      if (req.method === 'GET' && parsed.pathname === '/') return sendHtml(res, dashboardHtml());
+      if (req.method === 'GET' && parsed.pathname === '/') return sendHtml(res, dashboardHtml(options.noAuth ?? false));
+      if (req.method === 'GET' && parsed.pathname === '/qr') return sendHtml(res, qrPageHtml());
+      if (req.method === 'GET' && parsed.pathname === '/qr.png') {
+        try {
+          const png = readFileSync('data/latest-qr.png');
+          res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' });
+          return res.end(png);
+        } catch {
+          return sendJson(res, { error: 'qr_not_ready' }, 404);
+        }
+      }
 
-      if (parsed.pathname.startsWith('/api/') && !isAuthorized(req, options.authToken)) {
+      if (!options.noAuth && parsed.pathname.startsWith('/api/') && !isAuthorized(req, options.authToken)) {
         return sendJson(res, { error: 'unauthorized' }, 401);
       }
       if (req.method === 'GET' && parsed.pathname === '/api/conversations') return sendJson(res, { conversations: await options.store.listConversations(options.tenantId) });
@@ -186,7 +198,21 @@ function sendHtml(res: ServerResponse, body: string): void {
   res.end(body);
 }
 
-function dashboardHtml(): string {
+function qrPageHtml(): string {
+  return `<!doctype html><html lang="tr"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta http-equiv="refresh" content="5" />
+<title>WhatsApp QR</title>
+<style>body{margin:0;background:#0b141a;color:#e9edef;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;text-align:center;padding:24px}.q{width:340px;height:340px;background:#fff;padding:14px;border-radius:14px;margin:18px auto;display:block}.muted{color:#8696a0;font-size:13px}</style>
+</head><body>
+<h2>+1 hattından okut</h2>
+<p>WhatsApp Business → Ayarlar → Bağlı Cihazlar → Cihaz Bağla</p>
+<img class="q" src="/qr.png?t=${Date.now()}" alt="QR hazırlanıyor, birkaç sn bekleyin..." />
+<p class="muted">Sayfa 5 sn'de bir yenilenir (QR tazelenir). Bağlanınca bu sekmeyi kapatıp panele dön.</p>
+</body></html>`;
+}
+
+function dashboardHtml(noAuth: boolean): string {
   return `<!doctype html>
 <html lang="tr">
 <head>
@@ -238,6 +264,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
 .msg .time{display:block;font-size:10px;color:rgba(233,237,239,.55);margin-top:4px;text-align:right}
 .inbound{background:var(--in);margin-right:auto}
 .outbound.manual{background:var(--manual);margin-left:auto}
+.outbound.self{background:var(--manual);margin-left:auto}
 .outbound.bot{background:var(--bot);border:1px solid rgba(255,255,255,.12);margin-left:auto}
 .mediaBadge{display:inline-flex;align-items:center;gap:6px;padding:6px 8px;margin-bottom:6px;background:rgba(0,0,0,.2);border-radius:8px;font-size:12px}
 
@@ -434,6 +461,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
   function initials(name){ return (name||'?').trim().slice(0,1).toUpperCase(); }
 
   function getToken(){
+    if (${noAuth ? 'true' : 'false'}) return '';
     var u = new URL(window.location.href);
     var fromUrl = u.searchParams.get('token');
     if (fromUrl) {
@@ -551,7 +579,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
       var origin = m.direction === 'outbound' ? (m.origin || 'manual') : '';
       var el = document.createElement('div');
       el.className = 'msg ' + m.direction + ' ' + origin;
-      var label = m.direction === 'inbound' ? 'Müşteri' : (origin === 'bot' ? 'MURTAZA Bot' : 'Sen / Operatör');
+      var label = m.direction === 'inbound' ? 'Müşteri' : (origin === 'bot' ? 'MURTAZA Bot' : origin === 'self' ? 'Sen (telefon)' : 'Sen / Operatör');
 
       var labelEl = document.createElement('span'); labelEl.className='label'; labelEl.textContent = label;
       el.appendChild(labelEl);

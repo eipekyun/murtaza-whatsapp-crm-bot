@@ -11,7 +11,9 @@ const config: RuntimeConfig = {
   autoReply: true,
   autoReplyAudience: 'whitelist',
   operatorPort: 8787,
-  operatorToken: '0123456789abcdef0123456789abcdef'
+  operatorToken: '0123456789abcdef0123456789abcdef',
+  operatorHost: '127.0.0.1',
+  operatorNoAuth: false
 };
 
 describe('baileys inbound message mapping', () => {

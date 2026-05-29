@@ -34,6 +34,7 @@ interface ConversationRow {
 export interface MessageStore {
   saveInbound(message: InboundMessage): Promise<void>;
   saveOutbound(message: OutboundMessage): Promise<void>;
+  saveContactName(tenantId: string, jid: string, name: string, source?: string): Promise<void>;
   listMessages(tenantId: string): Promise<InboundMessage[]>;
   listMessagesByChat(tenantId: string, chatId: string): Promise<StoredMessage[]>;
   listConversations(tenantId: string): Promise<ConversationSummary[]>;
@@ -83,6 +84,15 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
       value TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS contact_names (
+      tenant_id TEXT NOT NULL,
+      jid TEXT NOT NULL,
+      name TEXT NOT NULL,
+      source TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (tenant_id, jid)
+    );
   `);
   ensureColumn(db, 'messages', 'origin', 'TEXT');
   ensureColumn(db, 'messages', 'media_kind', 'TEXT');
@@ -102,6 +112,14 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
            sender_phone, sender_display_name, text, media_kind, media_name, media_mime, media_data, received_at
     FROM messages
   `;
+
+  const upsertContactName = db.prepare<[string, string, string, string | null, string]>(`
+    INSERT INTO contact_names (tenant_id, jid, name, source, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(tenant_id, jid) DO UPDATE SET
+      name = excluded.name, source = excluded.source, updated_at = excluded.updated_at
+    WHERE NOT (contact_names.source IN ('contact', 'group') AND excluded.source = 'push')
+  `);
 
   const getState = db.prepare<[string], { value: string }>('SELECT value FROM app_state WHERE key = ?');
   const stateReader = getState as unknown as { get: (key: string) => { value: string } | undefined };
@@ -137,7 +155,7 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
     ORDER BY received_at ASC
   `);
 
-  const conversations = db.prepare<[string, string], ConversationRow>(`
+  const conversations = db.prepare<[string, string, string], ConversationRow>(`
     WITH chat_names AS (
       SELECT chat_id, MIN(sender_display_name) AS display_name
       FROM messages
@@ -176,7 +194,7 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
     )
     SELECT
       latest.chat_id,
-      COALESCE(NULLIF(latest.identity_display_name, ''), NULLIF(latest.sender_display_name, ''), NULLIF(group_phones.phone, ''), NULLIF(latest.sender_phone, ''), latest.chat_id) AS display_name,
+      COALESCE(NULLIF(cn.name, ''), NULLIF(latest.identity_display_name, ''), NULLIF(latest.sender_display_name, ''), NULLIF(group_phones.phone, ''), NULLIF(latest.sender_phone, ''), latest.chat_id) AS display_name,
       COALESCE(NULLIF(group_phones.phone, ''), NULLIF(latest.sender_phone, ''), replace(latest.chat_id, '@s.whatsapp.net', '')) AS phone,
       latest.text AS latest_text,
       latest.received_at AS latest_at,
@@ -184,13 +202,14 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
     FROM latest
     LEFT JOIN group_phones ON group_phones.identity_key = latest.identity_key
     LEFT JOIN unread ON unread.identity_key = latest.identity_key
+    LEFT JOIN contact_names cn ON cn.tenant_id = ? AND cn.jid = latest.chat_id
     ORDER BY latest.received_at DESC
   `);
 
   const replyContext = db.prepare<[string, string], { last_bot_reply_at: string | null; last_manual_reply_at: string | null }>(`
     SELECT
       MAX(CASE WHEN direction = 'outbound' AND origin = 'bot' THEN received_at END) AS last_bot_reply_at,
-      MAX(CASE WHEN direction = 'outbound' AND origin = 'manual' THEN received_at END) AS last_manual_reply_at
+      MAX(CASE WHEN direction = 'outbound' AND origin IN ('manual', 'self') THEN received_at END) AS last_manual_reply_at
     FROM messages
     WHERE tenant_id = ? AND chat_id = ?
   `);
@@ -252,8 +271,14 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
       return listByChat.all(tenantId, chatId, chatId, tenantId).map(rowToStoredMessage);
     },
 
+    async saveContactName(tenantId: string, jid: string, name: string, source?: string): Promise<void> {
+      const clean = (name ?? '').trim();
+      if (!clean || !jid) return;
+      upsertContactName.run(tenantId, jid, clean.slice(0, 120), source ?? null, new Date().toISOString());
+    },
+
     async listConversations(tenantId: string): Promise<ConversationSummary[]> {
-      return conversations.all(tenantId, tenantId).map((row) => {
+      return conversations.all(tenantId, tenantId, tenantId).map((row) => {
         const settings = readConversationSettings(stateReader, tenantId, row.chat_id);
         return {
           chatId: row.chat_id,
@@ -347,7 +372,7 @@ function rowToStoredMessage(row: MessageRow): StoredMessage {
       channel: row.channel,
       provider: row.provider,
       direction: 'outbound',
-      origin: row.origin === 'bot' ? 'bot' : 'manual',
+      origin: row.origin === 'bot' ? 'bot' : row.origin === 'self' ? 'self' : 'manual',
       messageId: row.message_id,
       chatId: row.chat_id,
       recipientPhone: row.sender_phone,

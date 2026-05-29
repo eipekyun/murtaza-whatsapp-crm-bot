@@ -32,6 +32,7 @@ async function main(): Promise<void> {
       sock = nextSock;
     },
     onOutboundSent: (message) => store.saveOutbound(message),
+    onContactName: (jid, name, source) => store.saveContactName(config.tenantId, jid, name, source),
     onHistorySync: async ({ imported, progress }) => {
       const raw = await store.getAppState('history_import');
       const current = raw ? JSON.parse(raw) as { imported?: number } : {};
@@ -51,6 +52,7 @@ async function main(): Promise<void> {
     store,
     whitelistPhones: config.whitelistPhones,
     authToken: config.operatorToken,
+    noAuth: config.operatorNoAuth,
     getAutoReplyAudience: () => autoReplyAudience,
     setAutoReplyAudience: async (audience) => {
       autoReplyAudience = audience;
@@ -66,10 +68,11 @@ async function main(): Promise<void> {
     }
   });
 
-  operatorServer.listen(config.operatorPort, '127.0.0.1', () => {
-    const url = `http://127.0.0.1:${config.operatorPort}/?token=${config.operatorToken}`;
+  operatorServer.listen(config.operatorPort, config.operatorHost, () => {
+    const base = `http://${config.operatorHost}:${config.operatorPort}/`;
+    const url = config.operatorNoAuth ? base : `${base}?token=${config.operatorToken}`;
     console.log(`Operatör paneli hazır: ${url}`);
-    console.log('Token data/operator-token.txt dosyasında saklı (chmod 600).');
+    if (!config.operatorNoAuth) console.log('Token data/operator-token.txt dosyasında saklı (chmod 600).');
   });
 }
 

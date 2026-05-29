@@ -14,6 +14,7 @@ export interface BaileysClientOptions {
   onOutboundSent?: (message: OutboundMessage) => Promise<void>;
   onHistorySync?: (chunk: { imported: number; progress?: number }) => Promise<void>;
   onSocketReady?: (sock: WASocket) => void;
+  onContactName?: (jid: string, name: string, source?: string) => Promise<void> | void;
 }
 
 export async function startBaileysClient(config: RuntimeConfig, router: MessageRouter, options: BaileysClientOptions = {}): Promise<WASocket> {
@@ -31,11 +32,37 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
   sock.ev.on('creds.update', saveCreds);
   options.onSocketReady?.(sock);
 
-  sock.ev.on('messaging-history.set', async ({ messages, progress }) => {
+  const botSentIds = new Set<string>();
+  const resolvedGroups = new Set<string>();
+
+  async function resolveGroupName(jid: string): Promise<void> {
+    if (!jid.endsWith('@g.us') || resolvedGroups.has(jid)) return;
+    resolvedGroups.add(jid);
+    try {
+      const meta = await sock.groupMetadata(jid);
+      if (meta?.subject) await options.onContactName?.(jid, meta.subject, 'group');
+    } catch { /* grup metadata alınamazsa sessiz geç */ }
+  }
+
+  sock.ev.on('messaging-history.set', async ({ messages, contacts, chats, progress }) => {
+    for (const c of contacts ?? []) {
+      const name = c.name || c.notify || c.verifiedName;
+      if (c.id && name) void options.onContactName?.(c.id, name, 'contact');
+    }
+    for (const ch of chats ?? []) {
+      if (ch.id && ch.name && ch.id.endsWith('@g.us')) void options.onContactName?.(ch.id, ch.name, 'group');
+    }
     let imported = 0;
     for (const raw of messages) {
+      if (raw.key?.fromMe) {
+        const outbound = toOutboundFromSelf(config, raw);
+        if (outbound) { await options.onOutboundSent?.(outbound); imported += 1; }
+        continue;
+      }
       const inbound = toInboundMessage(config, raw);
       if (!inbound) continue;
+      if (raw.pushName) void options.onContactName?.(raw.key?.participant || inbound.chatId, raw.pushName, 'push');
+      void resolveGroupName(inbound.chatId);
       await router.handleInbound(inbound);
       imported += 1;
     }
@@ -71,13 +98,24 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
 
   sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const raw of messages) {
+      if (raw.key?.fromMe) {
+        const selfMessageId = raw.key.id ?? '';
+        if (selfMessageId && botSentIds.has(selfMessageId)) continue;
+        const outbound = toOutboundFromSelf(config, raw);
+        if (outbound) await options.onOutboundSent?.(outbound);
+        continue;
+      }
+
       const inbound = toInboundMessage(config, raw);
       if (!inbound) continue;
+      if (raw.pushName) void options.onContactName?.(raw.key?.participant || inbound.chatId, raw.pushName, 'push');
+      void resolveGroupName(inbound.chatId);
 
       const decision = await router.handleInbound(inbound);
       if (decision.shouldReply && decision.replyText) {
         await sendTypingPause(sock, inbound.chatId, decision.replyDelayMs ?? 2500);
         const sent = await sock.sendMessage(inbound.chatId, { text: decision.replyText });
+        if (sent?.key.id) botSentIds.add(sent.key.id);
         await options.onOutboundSent?.({
           tenantId: config.tenantId,
           channel: 'whatsapp',
@@ -94,7 +132,52 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
     }
   });
 
+  sock.ev.on('contacts.upsert', (contacts) => {
+    for (const c of contacts) {
+      const name = c.name || c.notify || c.verifiedName;
+      if (c.id && name) void options.onContactName?.(c.id, name, 'contact');
+    }
+  });
+
+  sock.ev.on('contacts.update', (updates) => {
+    for (const c of updates) {
+      const name = c.name || c.notify || c.verifiedName;
+      if (c.id && name) void options.onContactName?.(c.id, name, 'contact');
+    }
+  });
+
   return sock;
+}
+
+export function toOutboundFromSelf(config: RuntimeConfig, raw: proto.IWebMessageInfo): OutboundMessage | null {
+  const key = raw.key;
+  if (!key || !key.fromMe) return null;
+
+  const chatId = key.remoteJid;
+  const messageId = key.id;
+  if (!chatId || !messageId) return null;
+
+  const media = extractMedia(raw.message);
+  const text = extractText(raw.message) || media?.fallbackText;
+  if (!text && !media) return null;
+
+  const recipientPhone = chatId.split('@')[0] ?? chatId;
+
+  return {
+    tenantId: config.tenantId,
+    channel: 'whatsapp',
+    provider: 'baileys',
+    direction: 'outbound',
+    origin: 'self',
+    messageId,
+    chatId,
+    recipientPhone,
+    text: text ?? '',
+    mediaKind: media?.kind,
+    mediaName: media?.name,
+    mediaMime: media?.mime,
+    sentAt: new Date(Number(raw.messageTimestamp ?? Date.now() / 1000) * 1000)
+  };
 }
 
 export function toInboundMessage(config: RuntimeConfig, raw: proto.IWebMessageInfo): InboundMessage | null {
