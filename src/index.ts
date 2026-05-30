@@ -5,7 +5,7 @@ import { basename, join } from 'node:path';
 import { loadConfigFromEnv } from './config.js';
 import { createRouter } from './router.js';
 import { createSqliteMessageStore } from './store/sqlite-message-store.js';
-import { createOperatorHttpServer, type MediaFile } from './http/operator-server.js';
+import { createOperatorHttpServer, type GroupInfo, type MediaFile } from './http/operator-server.js';
 import { startBaileysClient, type BaileysClientOptions } from './whatsapp/baileys-client.js';
 import { createDrivePythonRunner, createMediaArchiver } from './media/media-archiver.js';
 import type { MediaKind } from './types.js';
@@ -191,6 +191,36 @@ async function main(): Promise<void> {
     return undefined;
   }
 
+  // Grup detayı: canlı groupMetadata (tam üye listesi) + DB'deki mesaj gönderen adlarıyla
+  // zenginleştirme. Metadata alınamazsa (sock yok/hata) DB üyeleriyle fallback.
+  function phoneFromJid(jid: string): string {
+    const local = (jid.split('@')[0] ?? '').split(':')[0] ?? '';
+    return local.replace(/[^0-9]/g, '') || local || jid;
+  }
+  async function resolveGroupInfo(chatId: string): Promise<GroupInfo | undefined> {
+    if (!chatId.endsWith('@g.us')) return undefined;
+    const dbMembers = await store.getGroupMembersFromMessages(config.tenantId, chatId);
+    const nameByPhone = new Map(dbMembers.map((m) => [m.phone, m.name]));
+    let subject: string | undefined;
+    let members = dbMembers.map((m) => ({ phone: m.phone, name: m.name, admin: false }));
+    try {
+      const meta = await sock.groupMetadata(chatId);
+      subject = meta?.subject ?? undefined;
+      if (meta?.participants?.length) {
+        members = meta.participants.map((p) => {
+          // Baileys v7: p.id LID olabilir; gerçek telefon p.phoneNumber'da. İsim p.name (rehber)
+          // veya p.notify (kişinin kendi adı), yoksa DB'deki mesaj gönderen adı.
+          const phone = phoneFromJid(p.phoneNumber || p.id);
+          const name = (p.name && p.name.trim()) || (p.notify && p.notify.trim()) || nameByPhone.get(phone);
+          return { phone, name, admin: p.admin === 'admin' || p.admin === 'superadmin' };
+        });
+      }
+    } catch {
+      // canlı metadata yoksa DB üyeleriyle devam (mesaj atmış kişiler)
+    }
+    return { chatId, subject, count: members.length, members };
+  }
+
   const operatorServer = createOperatorHttpServer({
     tenantId: config.tenantId,
     store,
@@ -200,6 +230,7 @@ async function main(): Promise<void> {
     listCustomers,
     onCustomerAssigned: (chatId, slug) => mediaArchiver.onCustomerAssigned(chatId, slug),
     getMediaFile: (messageId) => resolveMediaFile(messageId),
+    getGroupInfo: (chatId) => resolveGroupInfo(chatId),
     getAutoReplyAudience: () => autoReplyAudience,
     setAutoReplyAudience: async (audience) => {
       autoReplyAudience = audience;

@@ -26,6 +26,19 @@ export interface CustomerOption {
   name: string;
 }
 
+export interface GroupMember {
+  phone: string;
+  name?: string;
+  admin: boolean;
+}
+
+export interface GroupInfo {
+  chatId: string;
+  subject?: string;
+  count: number;
+  members: GroupMember[];
+}
+
 export interface OperatorServerOptions {
   tenantId: string;
   store: MessageStore;
@@ -44,6 +57,7 @@ export interface OperatorServerOptions {
   listCustomers?: () => Promise<CustomerOption[]> | CustomerOption[];
   onCustomerAssigned?: (chatId: string, slug: string) => Promise<void> | void;
   getMediaFile?: (messageId: string) => Promise<MediaFile | undefined>;
+  getGroupInfo?: (chatId: string) => Promise<GroupInfo | undefined>;
 }
 
 export function createOperatorHttpServer(options: OperatorServerOptions): Server {
@@ -108,6 +122,13 @@ export function createOperatorHttpServer(options: OperatorServerOptions): Server
       if (req.method === 'GET' && parsed.pathname === '/api/customers') {
         const customers = options.listCustomers ? await options.listCustomers() : [];
         return sendJson(res, { customers });
+      }
+      if (req.method === 'GET' && parsed.pathname === '/api/group-info') {
+        const chatId = parsed.searchParams.get('chatId');
+        if (!chatId) return sendJson(res, { error: 'chatId_required' }, 400);
+        const info = options.getGroupInfo ? await options.getGroupInfo(chatId) : undefined;
+        if (!info) return sendJson(res, { error: 'not_a_group' }, 404);
+        return sendJson(res, { info });
       }
       if (req.method === 'GET' && parsed.pathname.startsWith('/api/media/')) {
         const messageId = decodeURIComponent(parsed.pathname.slice('/api/media/'.length));
@@ -413,6 +434,11 @@ body{margin:0;background:var(--bg);color:var(--text)}
 .detailRow:last-child{border-bottom:0}
 .detailRow .k{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.5px;flex:0 0 130px}
 .detailRow .v{flex:1;word-break:break-word;text-align:right}
+.memberRow{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--line)}
+.memberRow:last-child{border-bottom:0}
+.memberName{color:var(--text);font-size:14px}
+.memberPhone{margin-left:auto;color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+.adminPill{font-size:10px;background:#00a884;color:#0b141a;padding:1px 7px;border-radius:999px;font-weight:600}
 .detailHero{display:flex;align-items:center;gap:14px;margin-bottom:10px}
 .detailHero .avatar{width:56px;height:56px;font-size:22px}
 .notice{background:rgba(245,197,66,.12);border:1px solid rgba(245,197,66,.4);color:#f5c542;border-radius:8px;padding:8px 10px;font-size:12px;margin:8px 0}
@@ -555,7 +581,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
 <div class="modalBg" id="detailModal">
   <div class="modal">
     <div class="bar" style="margin:-18px -18px 12px -18px;border-radius:16px 16px 0 0">
-      <b>Kişi detayı</b><div class="spacer"></div><button class="icon" id="closeDetail">×</button>
+      <b id="detailTitle">Kişi detayı</b><div class="spacer"></div><button class="icon" id="closeDetail">×</button>
     </div>
     <div class="detailHero"><div class="avatar" id="detailAvatar">?</div><div><div class="brand" id="detailName">—</div><div class="sub" id="detailPhone">—</div></div></div>
     <div class="notice">LID ve telefon JID kayıtları aynı kişi adıyla eşleşirse bu panelde tek konuşma olarak birleştirilir. Aşağıda en güncel chat kimliği gösterilir.</div>
@@ -567,6 +593,10 @@ body{margin:0;background:var(--bg);color:var(--text)}
     <div class="detailRow"><div class="k">Bot durumu</div><div class="v" id="detailBot">—</div></div>
     <div class="detailRow"><div class="k">Etiketler</div><div class="v" id="detailTags">—</div></div>
     <div class="detailRow"><div class="k">Not</div><div class="v" id="detailNote">—</div></div>
+    <div id="detailMembersBlock" style="display:none;margin-top:12px">
+      <div class="k" style="margin-bottom:6px">Grup üyeleri (<span id="detailMemberCount">0</span>)</div>
+      <div id="detailMembers"></div>
+    </div>
   </div>
 </div>
 
@@ -921,15 +951,41 @@ body{margin:0;background:var(--bg);color:var(--text)}
     });
   }
 
+  async function loadGroupMembers(chatId){
+    var block = $('detailMembersBlock');
+    var root = $('detailMembers');
+    root.innerHTML = '';
+    try {
+      var data = await api('/api/group-info?chatId=' + encodeURIComponent(chatId));
+      var info = data.info;
+      if (!info) { block.style.display = 'none'; return; }
+      var members = info.members || [];
+      $('detailMemberCount').textContent = String(info.count || members.length);
+      members.forEach(function(m){
+        var row = document.createElement('div'); row.className = 'memberRow';
+        var nm = document.createElement('span'); nm.className = 'memberName';
+        nm.textContent = m.name || ('+' + m.phone);
+        row.appendChild(nm);
+        if (m.admin) { var ad = document.createElement('span'); ad.className = 'adminPill'; ad.textContent = 'admin'; row.appendChild(ad); }
+        var ph = document.createElement('span'); ph.className = 'memberPhone'; ph.textContent = '+' + m.phone;
+        row.appendChild(ph);
+        root.appendChild(row);
+      });
+      block.style.display = members.length ? 'block' : 'none';
+    } catch(e){ block.style.display = 'none'; }
+  }
+
   function openDetail(){
     if (!selectedChatId || !selectedConversation) {
       alert('Önce bir konuşma seç.');
       return;
     }
     var c = selectedConversation;
+    var isGroup = (selectedChatId || '').slice(-5) === '@g.us';
+    $('detailTitle').textContent = isGroup ? 'Grup detayı' : 'Kişi detayı';
     $('detailAvatar').textContent = initials(c.displayName || c.phone);
     $('detailName').textContent = c.displayName || c.phone || '—';
-    $('detailPhone').textContent = c.phone || '—';
+    $('detailPhone').textContent = isGroup ? 'Grup' : (c.phone || '—');
     $('detailPushName').textContent = c.pushName || '—';
     $('detailChatId').textContent = c.chatId || '—';
     $('detailLatest').textContent = c.latestText || '—';
@@ -947,6 +1003,8 @@ body{margin:0;background:var(--bg);color:var(--text)}
       tagsRoot.textContent = '—';
     }
     $('detailNote').textContent = s.note || '—';
+    if (isGroup) { loadGroupMembers(selectedChatId); }
+    else { $('detailMembersBlock').style.display = 'none'; }
     $('detailModal').classList.add('open');
   }
 

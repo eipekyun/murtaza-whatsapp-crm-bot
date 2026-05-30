@@ -41,6 +41,7 @@ function fakeStore(): MessageStore & {
     getMediaForServe: async (): Promise<MediaServeInfo | undefined> => undefined,
     listPendingMediaByChat: async (_t: string, chatId: string) => pending.get(chatId) ?? [],
     listAllPendingMedia: async () => [...pending.values()].flat(),
+    getGroupMembersFromMessages: async () => [],
     resetStaleUploading: async () => {},
     getAppState: async () => undefined,
     setAppState: async () => {},

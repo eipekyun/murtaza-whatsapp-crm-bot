@@ -78,6 +78,21 @@ describe('sqlite message store', () => {
     store.close();
   });
 
+  it('getGroupMembersFromMessages returns distinct senders with their display names', async () => {
+    tmp = mkdtempSync(join(tmpdir(), 'murtaza-wa-'));
+    const store = createSqliteMessageStore(join(tmp, 'messages.sqlite'));
+
+    await store.saveInbound(message({ messageId: 'g1', chatId: '120363407358572607@g.us', senderPhone: '905322013401', senderDisplayName: 'Ersin' }));
+    await store.saveInbound(message({ messageId: 'g2', chatId: '120363407358572607@g.us', senderPhone: '905312153333', senderDisplayName: 'Irem' }));
+    await store.saveInbound(message({ messageId: 'g3', chatId: '120363407358572607@g.us', senderPhone: '905322013401', senderDisplayName: 'Ersin' }));
+
+    const members = await store.getGroupMembersFromMessages('esmark-test', '120363407358572607@g.us');
+    expect(members.map((m) => m.phone).sort()).toEqual(['905312153333', '905322013401']);
+    expect(members.find((m) => m.phone === '905322013401')?.name).toBe('Ersin');
+
+    store.close();
+  });
+
   it('individual chat merges same-name LID/PN chats but excludes groups', async () => {
     tmp = mkdtempSync(join(tmpdir(), 'murtaza-wa-'));
     const store = createSqliteMessageStore(join(tmp, 'messages.sqlite'));

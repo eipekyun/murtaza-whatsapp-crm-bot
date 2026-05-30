@@ -78,6 +78,8 @@ export interface MessageStore {
   getMediaForServe(tenantId: string, messageId: string): Promise<MediaServeInfo | undefined>;
   listPendingMediaByChat(tenantId: string, chatId: string): Promise<PendingMedia[]>;
   listAllPendingMedia(tenantId: string): Promise<PendingMedia[]>;
+  // Grup detayı için: bir gruba mesaj atmış kişilerin telefon → görünen ad eşlemesi.
+  getGroupMembersFromMessages(tenantId: string, chatId: string): Promise<Array<{ phone: string; name?: string }>>;
   resetStaleUploading(tenantId: string): Promise<void>;
   getAppState(key: string): Promise<string | undefined>;
   setAppState(key: string, value: string): Promise<void>;
@@ -353,6 +355,16 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
     ORDER BY received_at ASC
   `);
 
+  // Grup detayı: gruba mesaj atmış kişiler (telefon + en sık görünen ad).
+  const groupMembersStmt = db.prepare<[string, string], { phone: string; name: string | null }>(`
+    SELECT sender_phone AS phone, MIN(sender_display_name) AS name
+    FROM messages
+    WHERE tenant_id = ? AND chat_id = ? AND direction = 'inbound'
+      AND sender_phone IS NOT NULL AND sender_phone != '' AND sender_phone NOT LIKE '%@%'
+    GROUP BY sender_phone
+    ORDER BY name IS NULL, name ASC
+  `);
+
   // Restart recovery: önceki oturumda yarıda kalmış 'uploading' kayıtları 'pending'e çevir.
   const resetStaleUploadingStmt = db.prepare<[string]>(`
     UPDATE messages SET media_upload_status = 'pending'
@@ -529,6 +541,13 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
 
     async listAllPendingMedia(tenantId: string): Promise<PendingMedia[]> {
       return allPendingMediaStmt.all(tenantId).map(toPendingMedia);
+    },
+
+    async getGroupMembersFromMessages(tenantId: string, chatId: string): Promise<Array<{ phone: string; name?: string }>> {
+      return groupMembersStmt.all(tenantId, chatId).map((row) => ({
+        phone: row.phone,
+        name: row.name && row.name.trim() ? row.name.trim() : undefined
+      }));
     },
 
     async resetStaleUploading(tenantId: string): Promise<void> {
