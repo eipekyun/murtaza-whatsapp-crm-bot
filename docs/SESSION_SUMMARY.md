@@ -1,6 +1,6 @@
 # SESSION_SUMMARY — murtaza-whatsapp-crm-bot
 
-Son güncelleme: 2026-05-30 (medya Drive arşivleme + MURTAZA inbox fallback)
+Son güncelleme: 2026-05-30 (medya arşivleme + inbox fallback + grup ayrımı/detay paneli)
 
 ## 2026-05-30 — Gelen medya Drive arşivleme + atanmamış için MURTAZA inbox fallback
 
@@ -22,6 +22,20 @@ Commit `e32e6f3` (local, remote yok). Bot bu özellikle canlıda çalışıyor.
 **Doğrulama:** tsc temiz, 52 test (44→52). Canlı end-to-end: gerçek +1 görseli `Gelen-Kutusu/905322013401/Görseller/3EB0A724…jpg`, panelden Drive serve HTTP 200 (1024x1024 jpeg). Panel tıklama ilk denemede çalışmadı = **tarayıcı cache** (sayfa yenileyince düzeldi, kod sorunu değil).
 
 **Açık not (gelecek iş):** Medya arşivleme şu an SADECE whitelist (2 numara: +1 + Ersin). İleride müşteri sohbetleri (whitelist dışı, atanmış) eklenince guard genişletilmeli: "whitelist İÇİ VEYA sohbet bir firmaya atanmış".
+
+## 2026-05-30 (devamı) — Grup sohbeti ayrımı + grup detay paneli
+
+Aynı gün panel testinde kullanıcı grup sorunlarını bildirdi → 3 commit:
+
+- **`ebef9d6` fix — grup içeriği:** `listByChat`'in isim-bazlı sohbet birleştirmesi (LID↔telefon aynı kişiyi tek sohbette toplamak için) gruplara da uygulanıyordu → grupta "Ersin" yazınca Ersin'in **bireysel** sohbeti (53 mesaj) grup görünümüne sızıyordu (grup açınca 4 yerine 57 mesaj). Düzeltme: `@g.us` tam-eşleşme (birleştirme yok); bireysel birleştirme de `@g.us`'u dışlar. + Panel: grup mesajlarında etiket = gerçek gönderen adı (`senderDisplayName`), generic "Müşteri" değil.
+- **`3ae591a` fix — sohbet listesi (aynı hatanın 2. yüzü):** `conversations` sorgusu `identity_key`'i gönderen adından üretiyordu → grup "Atölye Bambini"nin `MIN(ad)`='Ersin', Ersin bireysel de 'Ersin' → aynı `identity_key` → birleşip Ersin'in bireysel sohbeti **listeden tamamen siliniyordu** ("Ersin'in mesajları yok"). Düzeltme: gruplar `identity_key` olarak hep kendi `chat_id`'lerini alır.
+- **`9df4e02` feat — grup detay paneli:** Grup ℹ → "Grup detayı" + üyeler **telefon + isim + admin** rozetiyle. Veri canlı Baileys `groupMetadata.participants`; eksik isimler DB grup-mesaj gönderen adından. Yeni: `/api/group-info`, `store.getGroupMembersFromMessages`, `index.resolveGroupInfo`.
+
+**KRİTİK öğrenim — isim-bazlı sohbet birleştirme tehlikeli:** `listByChat` + `conversations`'taki "aynı `sender_display_name` = aynı sohbet" mantığı LID↔PN için tasarlanmış ama (a) grupları bireysellerle karıştırıyordu (düzeltildi), (b) tam aynı görünen adlı iki FARKLI bireysel kişiyi de birleştirebilir → **açık risk**. İdeal çözüm: birleştirmeyi isimle değil JID-mapping ile yapmak (gelecek iş).
+
+**Baileys v7 LID tuzağı:** `groupMetadata` participant.id artık `@lid`; **gerçek telefon `Contact.phoneNumber`**, rehber adı `Contact.name`, kişinin kendi adı `Contact.notify`. participant.id'yi telefon sanma (ilk denememde LID numaraları geldi).
+
+56 test. Canlı doğrulama: grup API 57→4, sohbet listesi 68→69 (Ersin geri), grup detay 5 üye gerçek TR numaralarıyla (905322013401 Ersin [admin], 905312153333 Irem [admin]...).
 
 ## 2026-05-29 akşam — bot canlı + WhatsApp-benzeri panel (özet)
 
