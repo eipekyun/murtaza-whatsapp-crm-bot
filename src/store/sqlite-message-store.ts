@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
-import type { ConversationSettings, ConversationSummary, InboundMessage, OutboundMessage, ReadReceiptMode, StoredMessage } from '../types.js';
+import type { ConversationSettings, ConversationSummary, InboundMessage, MediaUploadStatus, OutboundMessage, ReadReceiptMode, StoredMessage } from '../types.js';
 import { normalizePhone, normalizeWhitelist } from '../phone.js';
 
 interface MessageRow {
@@ -19,8 +19,33 @@ interface MessageRow {
   media_name: string | null;
   media_mime: string | null;
   media_data: string | null;
+  media_local_path: string | null;
+  media_drive_id: string | null;
+  media_drive_url: string | null;
+  media_upload_status: string | null;
   received_at: string;
   status: number | null;
+}
+
+export interface MediaServeInfo {
+  direction: StoredMessage['direction'];
+  mediaKind?: StoredMessage['mediaKind'];
+  mediaName?: string;
+  mediaMime?: string;
+  mediaData?: string;
+  mediaLocalPath?: string;
+  mediaDriveId?: string;
+  mediaDriveUrl?: string;
+  mediaUploadStatus?: MediaUploadStatus;
+}
+
+export interface PendingMedia {
+  messageId: string;
+  chatId: string;
+  mediaKind?: StoredMessage['mediaKind'];
+  mediaName?: string;
+  mediaMime?: string;
+  localPath: string;
 }
 
 interface ConversationRow {
@@ -47,6 +72,13 @@ export interface MessageStore {
   getConversationSettings(tenantId: string, chatId: string): Promise<ConversationSettings>;
   setConversationSettings(tenantId: string, chatId: string, patch: Partial<ConversationSettings>): Promise<ConversationSettings>;
   hasWhitelistedAlias(tenantId: string, displayName: string, whitelistPhones: string[]): Promise<boolean>;
+  markMediaPending(tenantId: string, messageId: string, localPath: string): Promise<void>;
+  setMediaUploadStatus(tenantId: string, messageId: string, status: MediaUploadStatus): Promise<void>;
+  markMediaDone(tenantId: string, messageId: string, driveId: string, driveUrl: string): Promise<void>;
+  getMediaForServe(tenantId: string, messageId: string): Promise<MediaServeInfo | undefined>;
+  listPendingMediaByChat(tenantId: string, chatId: string): Promise<PendingMedia[]>;
+  listAllPendingMedia(tenantId: string): Promise<PendingMedia[]>;
+  resetStaleUploading(tenantId: string): Promise<void>;
   getAppState(key: string): Promise<string | undefined>;
   setAppState(key: string, value: string): Promise<void>;
   close(): void;
@@ -104,6 +136,10 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
   ensureColumn(db, 'messages', 'media_name', 'TEXT');
   ensureColumn(db, 'messages', 'media_mime', 'TEXT');
   ensureColumn(db, 'messages', 'media_data', 'TEXT');
+  ensureColumn(db, 'messages', 'media_local_path', 'TEXT');
+  ensureColumn(db, 'messages', 'media_drive_id', 'TEXT');
+  ensureColumn(db, 'messages', 'media_drive_url', 'TEXT');
+  ensureColumn(db, 'messages', 'media_upload_status', 'TEXT');
   ensureColumn(db, 'messages', 'status', 'INTEGER');
   ensureColumn(db, 'contact_names', 'push_name', 'TEXT');
 
@@ -116,7 +152,8 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
 
   const selectColumns = `
     SELECT tenant_id, channel, provider, direction, origin, message_id, chat_id,
-           sender_phone, sender_display_name, text, media_kind, media_name, media_mime, media_data, received_at, status
+           sender_phone, sender_display_name, text, media_kind, media_name, media_mime, media_data,
+           media_local_path, media_drive_id, media_drive_url, media_upload_status, received_at, status
     FROM messages
   `;
 
@@ -254,6 +291,55 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
       AND sender_phone != ''
   `);
 
+  // Yalnızca yeni (NULL) veya başarısız (error) medyayı 'pending'e al; halihazırda
+  // uploading/done/pending olan kaydı sıfırlama (duplicate messages.upsert status gerilemesini önler).
+  const markMediaPendingStmt = db.prepare<[string, string, string]>(`
+    UPDATE messages SET media_local_path = ?, media_upload_status = 'pending'
+    WHERE tenant_id = ? AND message_id = ?
+      AND (media_upload_status IS NULL OR media_upload_status = 'error')
+  `);
+
+  const setMediaUploadStatusStmt = db.prepare<[string, string, string]>(`
+    UPDATE messages SET media_upload_status = ?
+    WHERE tenant_id = ? AND message_id = ?
+  `);
+
+  const markMediaDoneStmt = db.prepare<[string, string, string, string]>(`
+    UPDATE messages SET media_drive_id = ?, media_drive_url = ?,
+      media_upload_status = 'done', media_local_path = NULL
+    WHERE tenant_id = ? AND message_id = ?
+  `);
+
+  const mediaForServeStmt = db.prepare<[string, string], MessageRow>(`
+    ${selectColumns}
+    WHERE tenant_id = ? AND message_id = ?
+    LIMIT 1
+  `);
+  const mediaForServeReader = mediaForServeStmt as unknown as { get: (tenantId: string, messageId: string) => MessageRow | undefined };
+
+  const pendingMediaStmt = db.prepare<[string, string], MessageRow>(`
+    ${selectColumns}
+    WHERE tenant_id = ? AND chat_id = ? AND direction = 'inbound'
+      AND media_local_path IS NOT NULL AND media_local_path != ''
+      AND (media_upload_status IS NULL OR media_upload_status IN ('pending', 'error'))
+    ORDER BY received_at ASC
+  `);
+
+  // Restart recovery: tüm sohbetlerdeki bekleyen/başarısız medya (chat filtresiz).
+  const allPendingMediaStmt = db.prepare<[string], MessageRow>(`
+    ${selectColumns}
+    WHERE tenant_id = ? AND direction = 'inbound'
+      AND media_local_path IS NOT NULL AND media_local_path != ''
+      AND (media_upload_status IS NULL OR media_upload_status IN ('pending', 'error'))
+    ORDER BY received_at ASC
+  `);
+
+  // Restart recovery: önceki oturumda yarıda kalmış 'uploading' kayıtları 'pending'e çevir.
+  const resetStaleUploadingStmt = db.prepare<[string]>(`
+    UPDATE messages SET media_upload_status = 'pending'
+    WHERE tenant_id = ? AND media_upload_status = 'uploading'
+  `);
+
   return {
     async saveInbound(message: InboundMessage): Promise<void> {
       insert.run(
@@ -369,7 +455,8 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
         botEnabled: patch.botEnabled ?? current.botEnabled,
         tags: Array.isArray(patch.tags) ? patch.tags.map(String).map((tag) => tag.trim()).filter(Boolean).slice(0, 12) : current.tags,
         note: typeof patch.note === 'string' ? patch.note.trim().slice(0, 1000) : current.note,
-        readReceipt: patch.readReceipt ?? current.readReceipt
+        readReceipt: patch.readReceipt ?? current.readReceipt,
+        customerSlug: typeof patch.customerSlug === 'string' ? normalizeSlug(patch.customerSlug) : current.customerSlug
       };
       setState.run(conversationSettingsKey(tenantId, chatId), JSON.stringify(next), new Date().toISOString());
       return next;
@@ -380,6 +467,49 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
       if (!name) return false;
       const whitelist = normalizeWhitelist(whitelistPhones);
       return phonesByDisplayName.all(tenantId, name).some((row) => whitelist.has(normalizePhone(row.sender_phone)));
+    },
+
+    async markMediaPending(tenantId: string, messageId: string, localPath: string): Promise<void> {
+      if (!messageId || !localPath) return;
+      markMediaPendingStmt.run(localPath, tenantId, messageId);
+    },
+
+    async setMediaUploadStatus(tenantId: string, messageId: string, status: MediaUploadStatus): Promise<void> {
+      if (!messageId) return;
+      setMediaUploadStatusStmt.run(status, tenantId, messageId);
+    },
+
+    async markMediaDone(tenantId: string, messageId: string, driveId: string, driveUrl: string): Promise<void> {
+      if (!messageId) return;
+      markMediaDoneStmt.run(driveId, driveUrl, tenantId, messageId);
+    },
+
+    async getMediaForServe(tenantId: string, messageId: string): Promise<MediaServeInfo | undefined> {
+      const row = mediaForServeReader.get(tenantId, messageId);
+      if (!row) return undefined;
+      return {
+        direction: row.direction,
+        mediaKind: normalizeMediaKind(row.media_kind),
+        mediaName: row.media_name ?? undefined,
+        mediaMime: row.media_mime ?? undefined,
+        mediaData: row.media_data ?? undefined,
+        mediaLocalPath: row.media_local_path ?? undefined,
+        mediaDriveId: row.media_drive_id ?? undefined,
+        mediaDriveUrl: row.media_drive_url ?? undefined,
+        mediaUploadStatus: normalizeUploadStatus(row.media_upload_status)
+      };
+    },
+
+    async listPendingMediaByChat(tenantId: string, chatId: string): Promise<PendingMedia[]> {
+      return pendingMediaStmt.all(tenantId, chatId).map(toPendingMedia);
+    },
+
+    async listAllPendingMedia(tenantId: string): Promise<PendingMedia[]> {
+      return allPendingMediaStmt.all(tenantId).map(toPendingMedia);
+    },
+
+    async resetStaleUploading(tenantId: string): Promise<void> {
+      resetStaleUploadingStmt.run(tenantId);
     },
 
     async getAppState(key: string): Promise<string | undefined> {
@@ -410,15 +540,37 @@ function readConversationSettings(getState: { get: (key: string) => { value: str
   if (!raw) return fallback;
   try {
     const parsed = JSON.parse(raw) as Partial<ConversationSettings>;
+    const slug = typeof parsed.customerSlug === 'string' ? normalizeSlug(parsed.customerSlug) : undefined;
     return {
       botEnabled: parsed.botEnabled !== false,
       tags: Array.isArray(parsed.tags) ? parsed.tags.map(String).filter(Boolean) : [],
       note: typeof parsed.note === 'string' && parsed.note ? parsed.note : undefined,
-      readReceipt: parsed.readReceipt === 'on_open' || parsed.readReceipt === 'never' ? parsed.readReceipt : 'on_reply'
+      readReceipt: parsed.readReceipt === 'on_open' || parsed.readReceipt === 'never' ? parsed.readReceipt : 'on_reply',
+      customerSlug: slug || undefined
     };
   } catch {
     return fallback;
   }
+}
+
+function normalizeSlug(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+}
+
+function normalizeUploadStatus(value: string | null): MediaUploadStatus | undefined {
+  if (value === 'pending' || value === 'uploading' || value === 'done' || value === 'error' || value === 'skipped') return value;
+  return undefined;
+}
+
+function toPendingMedia(row: MessageRow): PendingMedia {
+  return {
+    messageId: row.message_id,
+    chatId: row.chat_id,
+    mediaKind: normalizeMediaKind(row.media_kind),
+    mediaName: row.media_name ?? undefined,
+    mediaMime: row.media_mime ?? undefined,
+    localPath: row.media_local_path ?? ''
+  };
 }
 
 function ensureColumn(db: { prepare: (sql: string) => { all: () => unknown[] }; exec: (sql: string) => void }, table: string, column: string, type: string): void {
@@ -444,6 +596,10 @@ function rowToStoredMessage(row: MessageRow): StoredMessage {
       mediaName: row.media_name ?? undefined,
       mediaMime: row.media_mime ?? undefined,
       mediaData: row.media_data ?? undefined,
+      mediaLocalPath: row.media_local_path ?? undefined,
+      mediaDriveId: row.media_drive_id ?? undefined,
+      mediaDriveUrl: row.media_drive_url ?? undefined,
+      mediaUploadStatus: normalizeUploadStatus(row.media_upload_status),
       status: row.status ?? undefined,
       sentAt: new Date(row.received_at)
     };
@@ -467,6 +623,10 @@ function rowToInboundMessage(row: MessageRow): InboundMessage {
     mediaName: row.media_name ?? undefined,
     mediaMime: row.media_mime ?? undefined,
     mediaData: row.media_data ?? undefined,
+    mediaLocalPath: row.media_local_path ?? undefined,
+    mediaDriveId: row.media_drive_id ?? undefined,
+    mediaDriveUrl: row.media_drive_url ?? undefined,
+    mediaUploadStatus: normalizeUploadStatus(row.media_upload_status),
     receivedAt: new Date(row.received_at)
   };
 }

@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { createReadStream, readFileSync, rmSync } from 'node:fs';
 import type { MessageStore } from '../store/sqlite-message-store.js';
 import { normalizePhone } from '../phone.js';
 
@@ -12,6 +12,18 @@ export interface WhatsAppSendPayload {
   document?: Buffer;
   documentName?: string;
   documentMime?: string;
+}
+
+export interface MediaFile {
+  path: string;
+  mime?: string;
+  name?: string;
+  cleanup?: boolean;
+}
+
+export interface CustomerOption {
+  slug: string;
+  name: string;
 }
 
 export interface OperatorServerOptions {
@@ -28,6 +40,10 @@ export interface OperatorServerOptions {
   getReplyDelaySeconds?: () => number;
   setReplyDelaySeconds?: (seconds: number) => Promise<void> | void;
   sendWhatsAppMessage: (payload: WhatsAppSendPayload) => Promise<string | undefined>;
+  // Medya arşivleme + firma atama
+  listCustomers?: () => Promise<CustomerOption[]> | CustomerOption[];
+  onCustomerAssigned?: (chatId: string, slug: string) => Promise<void> | void;
+  getMediaFile?: (messageId: string) => Promise<MediaFile | undefined>;
 }
 
 export function createOperatorHttpServer(options: OperatorServerOptions): Server {
@@ -39,7 +55,14 @@ export function createOperatorHttpServer(options: OperatorServerOptions): Server
       const parsed = new URL(req.url ?? '/', 'http://127.0.0.1');
 
       if (req.method === 'GET' && parsed.pathname === '/') return sendHtml(res, dashboardHtml(options.noAuth ?? false));
-      if (req.method === 'GET' && parsed.pathname === '/qr') return sendHtml(res, qrPageHtml());
+
+      // Auth guard: panel kabuğu '/' DIŞINDAKİ tüm path'ler (qr, qr.png, api) token ister.
+      // /qr.png WhatsApp cihaz-eşleme QR'ını içerir; korumasız bırakmak hesap ele geçirme vektörüdür.
+      if (!options.noAuth && parsed.pathname !== '/' && !isAuthorized(req, options.authToken, parsed)) {
+        return sendJson(res, { error: 'unauthorized' }, 401);
+      }
+
+      if (req.method === 'GET' && parsed.pathname === '/qr') return sendHtml(res, qrPageHtml(parsed.searchParams.get('token') ?? ''));
       if (req.method === 'GET' && parsed.pathname === '/qr.png') {
         try {
           const png = readFileSync('data/latest-qr.png');
@@ -48,10 +71,6 @@ export function createOperatorHttpServer(options: OperatorServerOptions): Server
         } catch {
           return sendJson(res, { error: 'qr_not_ready' }, 404);
         }
-      }
-
-      if (!options.noAuth && parsed.pathname.startsWith('/api/') && !isAuthorized(req, options.authToken)) {
-        return sendJson(res, { error: 'unauthorized' }, 401);
       }
       if (req.method === 'GET' && parsed.pathname === '/api/conversations') return sendJson(res, { conversations: await options.store.listConversations(options.tenantId) });
       if (req.method === 'GET' && parsed.pathname === '/api/messages') {
@@ -71,13 +90,32 @@ export function createOperatorHttpServer(options: OperatorServerOptions): Server
         const body = await readJson(req);
         const chatId = String(body.chatId ?? '').trim();
         if (!chatId) return sendJson(res, { error: 'chatId_required' }, 400);
+        const prevSlug = (await options.store.getConversationSettings(options.tenantId, chatId)).customerSlug;
         const settings = await options.store.setConversationSettings(options.tenantId, chatId, {
           botEnabled: typeof body.botEnabled === 'boolean' ? body.botEnabled : undefined,
           tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
           note: typeof body.note === 'string' ? body.note : undefined,
-          readReceipt: (body.readReceipt === 'on_reply' || body.readReceipt === 'on_open' || body.readReceipt === 'never') ? body.readReceipt : undefined
+          readReceipt: (body.readReceipt === 'on_reply' || body.readReceipt === 'on_open' || body.readReceipt === 'never') ? body.readReceipt : undefined,
+          customerSlug: typeof body.customerSlug === 'string' ? body.customerSlug : undefined
         });
+        // Yalnızca slug GERÇEKTEN değiştiyse tetikle; aynı slug'ı tekrar set etmek bekleyen
+        // medyayı yeniden kuyruğa atmasın (double-upload önler).
+        if (settings.customerSlug && settings.customerSlug !== prevSlug) {
+          await options.onCustomerAssigned?.(chatId, settings.customerSlug);
+        }
         return sendJson(res, { ok: true, settings });
+      }
+      if (req.method === 'GET' && parsed.pathname === '/api/customers') {
+        const customers = options.listCustomers ? await options.listCustomers() : [];
+        return sendJson(res, { customers });
+      }
+      if (req.method === 'GET' && parsed.pathname.startsWith('/api/media/')) {
+        const messageId = decodeURIComponent(parsed.pathname.slice('/api/media/'.length));
+        if (!messageId) return sendJson(res, { error: 'message_id_required' }, 400);
+        const file = options.getMediaFile ? await options.getMediaFile(messageId) : undefined;
+        if (!file) return sendJson(res, { error: 'media_not_found' }, 404);
+        const disposition = parsed.searchParams.get('disposition') === 'attachment' ? 'attachment' : 'inline';
+        return streamMediaFile(res, file, disposition);
       }
       if (req.method === 'POST' && parsed.pathname === '/api/mark-read') {
         const body = await readJson(req);
@@ -176,15 +214,16 @@ export function createOperatorHttpServer(options: OperatorServerOptions): Server
   });
 }
 
-function isAuthorized(req: IncomingMessage, expected: string): boolean {
+function isAuthorized(req: IncomingMessage, expected: string, parsed?: URL): boolean {
+  // Bearer header (panel fetch/api) VEYA ?token query (img src, /qr sayfası — header gönderemez).
   const header = req.headers['authorization'];
-  if (typeof header !== 'string') return false;
-  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
-  if (!match) return false;
-  const provided = Buffer.from(match[1].trim(), 'utf8');
-  const exp = Buffer.from(expected, 'utf8');
-  if (provided.length !== exp.length) return false;
-  return timingSafeEqual(provided, exp);
+  const fromHeader = typeof header === 'string' ? /^Bearer\s+(.+)$/i.exec(header.trim())?.[1]?.trim() : undefined;
+  const provided = fromHeader || parsed?.searchParams.get('token') || '';
+  if (!provided) return false;
+  const a = Buffer.from(provided, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -214,6 +253,36 @@ function decodeDataUrl(value: string, kind: 'image' | 'document'): DecodedDataUr
   return { buffer: Buffer.from(match[2] ?? '', 'base64'), mime };
 }
 
+function streamMediaFile(res: ServerResponse, file: MediaFile, disposition: 'inline' | 'attachment'): void {
+  const fallbackName = (file.name && file.name.trim()) || 'dosya';
+  // ASCII filename (eski tarayıcılar) + RFC 5987 UTF-8 filename* (Türkçe/emoji adlar için).
+  const asciiName = fallbackName.replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '_');
+  const utf8Name = encodeURIComponent(fallbackName);
+  // mime WhatsApp'tan gelir; CRLF/control char header injection riskine karşı temizle + ilk token'ı al.
+  const safeMime = (file.mime || 'application/octet-stream').replace(/[^\x20-\x7E]/g, '').split(';')[0]?.trim() || 'application/octet-stream';
+  const stream = createReadStream(file.path);
+  let cleaned = false;
+  function cleanup(): void {
+    if (cleaned) return;
+    cleaned = true;
+    if (file.cleanup) {
+      try { rmSync(file.path, { force: true }); } catch { /* temizlik best-effort */ }
+    }
+  }
+  stream.on('error', () => {
+    if (!res.headersSent) sendJson(res, { error: 'media_read_failed' }, 404);
+    else res.end();
+    cleanup();
+  });
+  res.writeHead(200, {
+    'content-type': safeMime,
+    'content-disposition': `${disposition}; filename="${asciiName}"; filename*=UTF-8''${utf8Name}`,
+    'cache-control': 'no-store'
+  });
+  res.on('close', cleanup);
+  stream.pipe(res);
+}
+
 function sendJson(res: ServerResponse, body: unknown, status = 200): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   res.end(JSON.stringify(body));
@@ -223,7 +292,10 @@ function sendHtml(res: ServerResponse, body: string): void {
   res.end(body);
 }
 
-function qrPageHtml(): string {
+function qrPageHtml(token: string): string {
+  // /qr.png artık auth guard arkasında; img header gönderemediği için token query'de taşınır.
+  // Sayfa kendini /qr?token=... ile yeniler, böylece token korunur.
+  const q = token ? `&token=${encodeURIComponent(token)}` : '';
   return `<!doctype html><html lang="tr"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta http-equiv="refresh" content="5" />
@@ -232,7 +304,7 @@ function qrPageHtml(): string {
 </head><body>
 <h2>+1 hattından okut</h2>
 <p>WhatsApp Business → Ayarlar → Bağlı Cihazlar → Cihaz Bağla</p>
-<img class="q" src="/qr.png?t=${Date.now()}" alt="QR hazırlanıyor, birkaç sn bekleyin..." />
+<img class="q" src="/qr.png?t=${Date.now()}${q}" alt="QR hazırlanıyor, birkaç sn bekleyin..." />
 <p class="muted">Sayfa 5 sn'de bir yenilenir (QR tazelenir). Bağlanınca bu sekmeyi kapatıp panele dön.</p>
 </body></html>`;
 }
@@ -295,6 +367,13 @@ body{margin:0;background:var(--bg);color:var(--text)}
 .outbound.self{background:var(--manual);margin-left:auto}
 .outbound.bot{background:var(--bot);border:1px solid rgba(255,255,255,.12);margin-left:auto}
 .mediaBadge{display:inline-flex;align-items:center;gap:6px;padding:6px 8px;margin-bottom:6px;background:rgba(0,0,0,.2);border-radius:8px;font-size:12px}
+.mediaBadge.clickable{cursor:pointer}
+.mediaBadge.clickable:hover{background:rgba(0,0,0,.35)}
+.mediaState{display:inline-block;margin-left:6px;font-size:11px;color:var(--muted)}
+.mediaMenu{position:fixed;z-index:60;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:6px;display:none;min-width:140px;box-shadow:0 6px 20px rgba(0,0,0,.4)}
+.mediaMenu.open{display:block}
+.mediaMenu button{display:block;width:100%;text-align:left;background:transparent;border:0;color:var(--text);padding:9px 12px;border-radius:7px;cursor:pointer;font:inherit}
+.mediaMenu button:hover{background:#2a3942}
 
 .composerWrap{flex:0 0 auto;background:var(--panel);border-top:1px solid var(--line);padding:8px 10px;position:relative}
 .composer{display:flex;align-items:flex-end;gap:6px}
@@ -390,6 +469,10 @@ body{margin:0;background:var(--bg);color:var(--text)}
         <h3>Seçili konuşma</h3>
         <div class="sub" id="convSettingsStatus">Konuşma seçilmedi</div>
         <div id="convSummary" style="margin:8px 0;font-size:13px"></div>
+        <label class="sub" style="display:block;margin-top:6px">Firma (gelen medya bu firmanın Drive'ına gider)</label>
+        <select id="convCustomer" style="width:100%;margin:4px 0;background:#2a3942;color:var(--text);border:0;border-radius:8px;padding:10px">
+          <option value="">— Firma atanmadı —</option>
+        </select>
         <label class="toggle" style="padding:8px 0">
           <span>Bot bu konuşmada açık</span>
           <input id="convBotEnabled" type="checkbox" checked />
@@ -499,6 +582,11 @@ body{margin:0;background:var(--bg);color:var(--text)}
   </div>
 </div>
 
+<div class="mediaMenu" id="mediaMenu">
+  <button type="button" id="mediaOpenBtn">Aç</button>
+  <button type="button" id="mediaDownloadBtn">İndir</button>
+</div>
+
 <script>
 (function(){
   var selectedChatId = null;
@@ -518,6 +606,75 @@ body{margin:0;background:var(--bg);color:var(--text)}
   function fmtDateTime(v){ try { return new Date(v).toLocaleString('tr-TR'); } catch(e){ return ''; } }
   function fmtTime(v){ try { return new Date(v).toLocaleTimeString('tr-TR',{hour:'2-digit',minute:'2-digit'}); } catch(e){ return ''; } }
   function initials(name){ return (name||'?').trim().slice(0,1).toUpperCase(); }
+  function mediaKindLabel(k){
+    if (k === 'image') return 'Görsel';
+    if (k === 'video') return 'Video';
+    if (k === 'audio') return 'Ses';
+    if (k === 'document') return 'Belge';
+    if (k === 'sticker') return 'Sticker';
+    return 'Medya';
+  }
+  function mediaStateLabel(m){
+    if (m.direction !== 'inbound') return '';
+    var s = m.mediaUploadStatus;
+    if (s === 'done') return '✓ Drive';
+    if (s === 'uploading') return '· yükleniyor';
+    if (s === 'error') return '· yüklenemedi';
+    if (s === 'pending') return '· firma bekliyor';
+    return '';
+  }
+
+  async function loadCustomers(){
+    try {
+      var data = await api('/api/customers');
+      var customers = data.customers || [];
+      var sel = $('convCustomer');
+      var current = sel.value;
+      sel.innerHTML = '<option value="">— Firma atanmadı —</option>';
+      customers.forEach(function(c){
+        var opt = document.createElement('option');
+        opt.value = c.slug;
+        opt.textContent = c.name || c.slug;
+        sel.appendChild(opt);
+      });
+      sel.value = current;
+    } catch(e){}
+  }
+
+  async function openMedia(messageId, disposition){
+    var token = sessionStorage.getItem('operatorToken') || '';
+    var headers = new Headers();
+    if (token) headers.set('Authorization', 'Bearer ' + token);
+    var r = await fetch('/api/media/' + encodeURIComponent(messageId) + '?disposition=' + disposition, { headers: headers });
+    if (!r.ok) { alert('Medya alınamadı (' + r.status + ')'); return; }
+    var blob = await r.blob();
+    var objectUrl = URL.createObjectURL(blob);
+    if (disposition === 'inline') {
+      window.open(objectUrl, '_blank');
+    } else {
+      var a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = (window.__mediaMenuName || 'dosya');
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+    setTimeout(function(){ URL.revokeObjectURL(objectUrl); }, 60000);
+  }
+
+  function closeMediaMenu(){ $('mediaMenu').classList.remove('open'); }
+  function showMediaMenu(ev, msg){
+    ev.preventDefault();
+    ev.stopPropagation();
+    window.__mediaMenuId = msg.messageId;
+    window.__mediaMenuName = msg.mediaName || mediaKindLabel(msg.mediaKind);
+    var menu = $('mediaMenu');
+    var x = Math.min(ev.clientX, window.innerWidth - 160);
+    var y = Math.min(ev.clientY, window.innerHeight - 110);
+    menu.style.left = x + 'px';
+    menu.style.top = y + 'px';
+    menu.classList.add('open');
+  }
 
   function getToken(){
     if (${noAuth ? 'true' : 'false'}) return '';
@@ -618,6 +775,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
     $('convTags').value = (settings.tags || []).join(', ');
     $('convNote').value = settings.note || '';
     $('convReadReceipt').value = settings.readReceipt || 'on_reply';
+    $('convCustomer').value = settings.customerSlug || '';
     var tagText = (settings.tags || []).join(', ') || 'etiket yok';
     $('convSettingsStatus').textContent = (settings.botEnabled === false ? 'Bot kapalı' : 'Bot açık') + ' · ' + tagText;
     if (selectedConversation) {
@@ -647,23 +805,22 @@ body{margin:0;background:var(--bg);color:var(--text)}
       el.appendChild(labelEl);
 
       if (m.mediaKind) {
-        var icon = m.mediaKind === 'image' ? '🖼' : '📎';
-        if (m.mediaData) {
-          var a = document.createElement('a');
-          a.className = 'mediaBadge';
-          a.href = m.mediaData;
-          a.download = m.mediaName || 'dosya';
-          a.target = '_blank';
-          a.textContent = icon + ' ' + (m.mediaName || m.mediaKind) + ' · aç/indir';
-          el.appendChild(a);
-          el.appendChild(document.createElement('br'));
-        } else {
-          var b = document.createElement('span');
-          b.className = 'mediaBadge';
-          b.textContent = icon + ' ' + (m.mediaName || m.mediaKind);
-          el.appendChild(b);
-          el.appendChild(document.createElement('br'));
+        var icon = m.mediaKind === 'image' ? '🖼' : (m.mediaKind === 'video' ? '🎬' : (m.mediaKind === 'audio' ? '🎵' : '📎'));
+        var chip = document.createElement('span');
+        chip.className = 'mediaBadge clickable';
+        chip.textContent = icon + ' ' + (m.mediaName || mediaKindLabel(m.mediaKind));
+        (function(msg){
+          chip.onclick = function(ev){ showMediaMenu(ev, msg); };
+        })(m);
+        el.appendChild(chip);
+        var state = mediaStateLabel(m);
+        if (state) {
+          var st = document.createElement('span');
+          st.className = 'mediaState';
+          st.textContent = state;
+          el.appendChild(st);
         }
+        el.appendChild(document.createElement('br'));
       }
 
       var body = document.createElement('span'); body.className='body'; body.textContent = m.text || '';
@@ -858,10 +1015,11 @@ body{margin:0;background:var(--bg);color:var(--text)}
     var note = $('convNote').value;
     var botEnabled = $('convBotEnabled').checked;
     var readReceipt = $('convReadReceipt').value;
+    var customerSlug = $('convCustomer').value;
     var status = $('convSaveStatus');
     setSaveStatus(status, '', 'Kaydediliyor…');
     try {
-      await api('/api/conversation-settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: selectedChatId, botEnabled: botEnabled, tags: tags, note: note, readReceipt: readReceipt }) });
+      await api('/api/conversation-settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: selectedChatId, botEnabled: botEnabled, tags: tags, note: note, readReceipt: readReceipt, customerSlug: customerSlug }) });
       setSaveStatus(status, 'ok', 'Kaydedildi');
     } catch (err) {
       setSaveStatus(status, 'err', 'Hata: ' + err.message);
@@ -869,6 +1027,30 @@ body{margin:0;background:var(--bg);color:var(--text)}
     await loadConversationSettings();
     await loadConversations();
   };
+
+  // Firma seçimi anında kaydedilir; atama bekleyen medyanın Drive'a yüklenmesini tetikler.
+  $('convCustomer').onchange = async function(){
+    if (!selectedChatId) return;
+    var customerSlug = $('convCustomer').value;
+    var status = $('convSaveStatus');
+    setSaveStatus(status, '', 'Firma atanıyor…');
+    try {
+      await api('/api/conversation-settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: selectedChatId, customerSlug: customerSlug }) });
+      setSaveStatus(status, 'ok', customerSlug ? 'Firma atandı, bekleyen medya yükleniyor' : 'Firma kaldırıldı');
+    } catch (err) {
+      setSaveStatus(status, 'err', 'Hata: ' + err.message);
+    }
+    await loadMessages(false);
+  };
+
+  $('mediaOpenBtn').onclick = function(){ closeMediaMenu(); if (window.__mediaMenuId) openMedia(window.__mediaMenuId, 'inline'); };
+  $('mediaDownloadBtn').onclick = function(){ closeMediaMenu(); if (window.__mediaMenuId) openMedia(window.__mediaMenuId, 'attachment'); };
+  document.addEventListener('click', function(ev){
+    var menu = $('mediaMenu');
+    if (!menu.classList.contains('open')) return;
+    if (menu.contains(ev.target)) return;
+    closeMediaMenu();
+  });
 
   async function loadSettings(){
     var s = await api('/api/settings');
@@ -919,7 +1101,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
     var s; try { s = await api('/api/wa-status'); } catch(e){ s = { state: 'unknown' }; }
     $('connStatus').textContent = 'Durum: ' + waStatusLabel(s);
     var qr = $('connQr');
-    if (s.state === 'qr') { qr.src = '/qr.png?t=' + Date.now(); qr.style.display = 'block'; $('connHint').textContent = 'Telefondan WhatsApp > Bağlı Cihazlar > Cihaz Bağla ile bu QR kodunu okut.'; }
+    if (s.state === 'qr') { var _tk = sessionStorage.getItem('operatorToken') || ''; qr.src = '/qr.png?t=' + Date.now() + (_tk ? '&token=' + encodeURIComponent(_tk) : ''); qr.style.display = 'block'; $('connHint').textContent = 'Telefondan WhatsApp > Bağlı Cihazlar > Cihaz Bağla ile bu QR kodunu okut.'; }
     else if (s.state === 'open') { qr.style.display = 'none'; $('connHint').textContent = 'Bağlı. İşlem gerekmez.'; }
     else { qr.style.display = 'none'; $('connHint').textContent = 'Bağlı değil. "Yeni QR oluştur" ile QR üret ve okut.'; }
   }
@@ -936,6 +1118,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
 
   buildQuickReplies();
   buildEmojiPicker();
+  loadCustomers();
   loadConversations();
   loadWhitelist();
   loadSettings();

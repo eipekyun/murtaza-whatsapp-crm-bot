@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { toInboundMessage } from '../src/whatsapp/baileys-client.js';
+import { extForMime, mediaExceedsLimit, safeSegment, toInboundMessage } from '../src/whatsapp/baileys-client.js';
 import type { RuntimeConfig } from '../src/config.js';
 
 const config: RuntimeConfig = {
@@ -13,7 +13,15 @@ const config: RuntimeConfig = {
   operatorPort: 8787,
   operatorToken: '0123456789abcdef0123456789abcdef',
   operatorHost: '127.0.0.1',
-  operatorNoAuth: false
+  operatorNoAuth: false,
+  archiveMedia: true,
+  archiveKinds: ['image', 'video', 'document', 'audio'],
+  maxMediaBytes: 50 * 1024 * 1024,
+  mediaIncomingDir: './data/media/incoming',
+  drivePython: '/usr/bin/python3',
+  driveUploadScript: './scripts/wa_drive_upload.py',
+  driveTokenPath: '/tmp/drive_token.json',
+  customersDir: './01-Musteriler'
 };
 
 describe('baileys inbound message mapping', () => {
@@ -33,5 +41,37 @@ describe('baileys inbound message mapping', () => {
     expect(inbound?.chatId).toBe('905322013401@s.whatsapp.net');
     expect(inbound?.senderPhone).toBe('905322013401');
     expect(inbound?.text).toBe('Merhaba');
+  });
+});
+
+describe('media local-file helpers', () => {
+  it('safeSegment strips path-unsafe chars from jid/messageId', () => {
+    expect(safeSegment('905322013401@s.whatsapp.net')).toBe('905322013401_s.whatsapp.net');
+    expect(safeSegment('29132796747799@lid')).toBe('29132796747799_lid');
+    expect(safeSegment('')).toBe('x');
+  });
+
+  it('extForMime maps known mimes and falls back to kind default', () => {
+    expect(extForMime('image/png', 'image')).toBe('.png');
+    expect(extForMime('video/mp4', 'video')).toBe('.mp4');
+    expect(extForMime('application/pdf', 'document')).toBe('.pdf');
+    expect(extForMime(undefined, 'audio')).toBe('.ogg');
+    expect(extForMime('application/unknown', 'document')).toBe('.bin');
+  });
+
+  it('mediaExceedsLimit handles number, string, Long-like and missing fileLength', () => {
+    // limit yoksa veya 0 ise asla aşmaz (limitsiz)
+    expect(mediaExceedsLimit(60_000_000, undefined)).toBe(false);
+    expect(mediaExceedsLimit(60_000_000, 0)).toBe(false);
+    // limit içi / dışı (number)
+    expect(mediaExceedsLimit(10_000, 50_000_000)).toBe(false);
+    expect(mediaExceedsLimit(60_000_000, 50_000_000)).toBe(true);
+    // fileLength bilinmiyorsa indir (false)
+    expect(mediaExceedsLimit(undefined, 50_000_000)).toBe(false);
+    expect(mediaExceedsLimit(null, 50_000_000)).toBe(false);
+    // Baileys Long objesi (toNumber) ve string
+    expect(mediaExceedsLimit({ toNumber: () => 60_000_000 }, 50_000_000)).toBe(true);
+    expect(mediaExceedsLimit('60000000', 50_000_000)).toBe(true);
+    expect(mediaExceedsLimit('abc', 50_000_000)).toBe(false);
   });
 });

@@ -15,11 +15,16 @@ export interface InboundMessage {
   mediaName?: string;
   mediaMime?: string;
   mediaData?: string;
+  mediaLocalPath?: string;
+  mediaDriveId?: string;
+  mediaDriveUrl?: string;
+  mediaUploadStatus?: MediaUploadStatus;
   receivedAt: Date;
 }
 
 export type OutboundOrigin = 'manual' | 'bot' | 'self';
 export type MediaKind = 'image' | 'document' | 'video' | 'audio' | 'sticker';
+export type MediaUploadStatus = 'pending' | 'uploading' | 'done' | 'error' | 'skipped';
 export type ReadReceiptMode = 'on_reply' | 'on_open' | 'never';
 
 export interface OutboundMessage {
@@ -36,6 +41,10 @@ export interface OutboundMessage {
   mediaName?: string;
   mediaMime?: string;
   mediaData?: string;
+  mediaLocalPath?: string;
+  mediaDriveId?: string;
+  mediaDriveUrl?: string;
+  mediaUploadStatus?: MediaUploadStatus;
   status?: number;
   sentAt: Date;
 }
@@ -47,6 +56,7 @@ export interface ConversationSettings {
   tags: string[];
   note?: string;
   readReceipt: ReadReceiptMode;
+  customerSlug?: string;
 }
 
 export interface ConversationSummary {

@@ -1,22 +1,39 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname, extname, join } from 'node:path';
 import makeWASocket, {
+  downloadMediaMessage,
   fetchLatestBaileysVersion,
   useMultiFileAuthState,
   type proto,
+  type WAMessage,
   type WASocket
 } from '@whiskeysockets/baileys';
 import type { RuntimeConfig } from '../config.js';
 import type { MessageRouter } from '../router.js';
-import type { InboundMessage, OutboundMessage } from '../types.js';
+import type { InboundMessage, MediaKind, OutboundMessage } from '../types.js';
+import { normalizePhone, normalizeWhitelist } from '../phone.js';
 import { writeQrArtifacts } from './qr-artifacts.js';
 import { shouldReconnectAfterClose } from './reconnect-policy.js';
 
 type AltKey = proto.IMessageKey & { remoteJidAlt?: string; participantAlt?: string };
+
+// downloadMediaMessage context tipi (Baileys v7'de logger zorunlu, pino Logger bekler).
+type DownloadCtx = Parameters<typeof downloadMediaMessage>[3];
 
 // WhatsApp LID (@lid) adreslemesi aynı kişiyi telefon JID'sinden ayrı gösterir.
 // Baileys mesaj key'inde PN karşılığı remoteJidAlt/participantAlt olarak gelir;
 // @lid ise PN'i tercih ederek sohbetleri tek kişide birleştiririz.
 function preferPn(jid: string | null | undefined, alt: string | null | undefined): string | null | undefined {
   return jid && jid.endsWith('@lid') && alt ? alt : jid;
+}
+
+export interface IncomingMediaEvent {
+  chatId: string;
+  messageId: string;
+  mediaKind: MediaKind;
+  mediaMime?: string;
+  mediaName?: string;
+  localPath: string;
 }
 
 export interface BaileysClientOptions {
@@ -29,6 +46,14 @@ export interface BaileysClientOptions {
   onConnectionState?: (state: string, me?: string) => void;
   getBotReplyDelayMs?: () => number;
   shouldStillReply?: (chatId: string, sinceIso: string) => Promise<boolean>;
+  // Gelen medya arşivleme: canlı inbound medya yerel dosyaya indirilince çağrılır.
+  onIncomingMedia?: (event: IncomingMediaEvent) => Promise<void> | void;
+  // Boyut limiti aşıldığı için indirilmeyen medya bildirilir (status=skipped işaretlemek için).
+  onMediaSkipped?: (event: { chatId: string; messageId: string; mediaKind: MediaKind }) => Promise<void> | void;
+  mediaIncomingDir?: string;
+  archiveKinds?: Set<MediaKind>;
+  // Gelen medya için indirme üst sınırı (bytes). Aşılırsa indirilmez. undefined = limitsiz.
+  maxMediaBytes?: number;
 }
 
 export async function startBaileysClient(config: RuntimeConfig, router: MessageRouter, options: BaileysClientOptions = {}): Promise<WASocket> {
@@ -134,6 +159,14 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
       if (raw.pushName) void options.onContactName?.(raw.key?.participant || inbound.chatId, raw.pushName, 'push');
       void resolveGroupName(inbound.chatId);
 
+      // Sadece CANLI inbound medya arşivlenir; messaging-history.set'e EKLENMEZ (toplu indirme yasak).
+      // Güvenlik: yalnızca whitelist'teki tanıdık gönderenlerin medyası indirilip arşivlenir.
+      // Aksi halde tanımadık/spam gönderen kullanıcının Drive'ına yazabilir (yetkisiz depolama).
+      const senderWhitelisted = normalizeWhitelist(config.whitelistPhones).has(normalizePhone(inbound.senderPhone));
+      if (inbound.mediaKind && options.onIncomingMedia && senderWhitelisted && (options.archiveKinds?.has(inbound.mediaKind) ?? true)) {
+        void archiveInboundMedia(sock, raw, inbound, options);
+      }
+
       const decision = await router.handleInbound(inbound);
       console.log(`Router kararı: chat=…${inbound.chatId.split('@')[0].slice(-4)} cevap=${decision.shouldReply} sebep=${decision.reason}`);
       // Çift güvenlik: gruba (@g.us) hiçbir koşulda otomatik cevap gönderme.
@@ -200,6 +233,12 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
 
   return sock;
 }
+
+// Test erişimi için saf yardımcıları açığa çıkar (runtime davranışı değişmez).
+export const __baileysInternals = {
+  safeSegment,
+  mediaExceedsLimit
+};
 
 export function toOutboundFromSelf(config: RuntimeConfig, raw: proto.IWebMessageInfo): OutboundMessage | null {
   const key = raw.key as AltKey | null | undefined;
@@ -290,6 +329,126 @@ function extractText(message: proto.IMessage | null | undefined): string | null 
     message.documentMessage?.caption ||
     null
   );
+}
+
+// Canlı inbound medyayı buffer olarak indirir, yerel geçici dosyaya yazar, onIncomingMedia tetikler.
+// Hata olursa sessiz yutmaz; loglar ama akışı kesmez (void + catch çağırandadır).
+async function archiveInboundMedia(
+  sock: WASocket,
+  raw: proto.IWebMessageInfo,
+  inbound: InboundMessage,
+  options: BaileysClientOptions
+): Promise<void> {
+  const kind = inbound.mediaKind;
+  if (!kind) return;
+  // Boyut limiti: indirmeden ÖNCE mesaj node'undaki fileLength'e bak. Aşıyorsa indirme
+  // (disk/RAM DoS koruması). fileLength yoksa best-effort indir.
+  const fileLength = mediaFileLength(raw.message);
+  if (mediaExceedsLimit(fileLength, options.maxMediaBytes)) {
+    console.error(`Medya boyut limiti aşıldı, atlandı: msg=${inbound.messageId} kind=${kind} bytes=${String(fileLength)}`);
+    try { await options.onMediaSkipped?.({ chatId: inbound.chatId, messageId: inbound.messageId, mediaKind: kind }); }
+    catch (error) { console.error('Medya skip işaretleme hatası:', error instanceof Error ? error.message : error); }
+    return;
+  }
+  try {
+    // raw burada geçerli key'e sahip (toInboundMessage key.id'yi zaten doğruladı);
+    // Baileys WAMessage tipini bekliyor, IWebMessageInfo'dan cast ediyoruz.
+    // Context, Baileys v7'de logger zorunlu; socket'in kendi logger'ını veriyoruz.
+    // socket logger ILogger, context Logger bekliyor (yapısal olarak uyumlu, sadece
+    // opsiyonel 'level' alanı eksik) -> context'i DownloadCtx olarak cast ediyoruz.
+    const ctx = {
+      logger: (sock as unknown as { logger: unknown }).logger,
+      reuploadRequest: sock.updateMediaMessage.bind(sock)
+    } as DownloadCtx;
+    const buffer = await downloadMediaMessage(raw as WAMessage, 'buffer', {}, ctx) as Buffer;
+    const baseDir = options.mediaIncomingDir ?? './data/media/incoming';
+    const chatSeg = safeSegment(inbound.chatId);
+    const ext = inbound.mediaName ? extname(inbound.mediaName) : extForMime(inbound.mediaMime, kind);
+    const nameSeg = inbound.mediaName ? `-${safeSegment(inbound.mediaName)}` : ext;
+    const localPath = join(baseDir, chatSeg, `${safeSegment(inbound.messageId)}${nameSeg}`);
+    await mkdir(dirname(localPath), { recursive: true });
+    await writeFile(localPath, buffer);
+    await options.onIncomingMedia?.({
+      chatId: inbound.chatId,
+      messageId: inbound.messageId,
+      mediaKind: kind,
+      mediaMime: inbound.mediaMime,
+      mediaName: inbound.mediaName,
+      localPath
+    });
+  } catch (error) {
+    console.error('Gelen medya arşivleme hatası:', error instanceof Error ? error.message : error);
+  }
+}
+
+export function safeSegment(value: string): string {
+  const cleaned = (value || 'x').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120) || 'x';
+  // Salt-nokta segmentleri (. / .. / ...) path traversal'a açar; nötrle.
+  return /^\.+$/.test(cleaned) ? 'x' : cleaned;
+}
+
+// Baileys medya node'undan fileLength'i çıkarır (image/video/document/audio).
+function mediaFileLength(message: proto.IMessage | null | undefined): unknown {
+  if (!message) return undefined;
+  return message.imageMessage?.fileLength
+    ?? message.videoMessage?.fileLength
+    ?? message.documentMessage?.fileLength
+    ?? message.audioMessage?.fileLength
+    ?? message.stickerMessage?.fileLength
+    ?? undefined;
+}
+
+// Boyut limiti kararı (saf fonksiyon, testlenir). fileLength Long olabilir (toNumber/low
+// alanlı obje) ya da number/string; bilinmiyorsa indir (false). maxBytes yoksa limit yok.
+export function mediaExceedsLimit(fileLength: unknown, maxBytes?: number): boolean {
+  if (!maxBytes || maxBytes <= 0) return false;
+  const size = toNumberLength(fileLength);
+  if (size === undefined) return false;
+  return size > maxBytes;
+}
+
+function toNumberLength(value: unknown): number | undefined {
+  if (value == null) return undefined;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'bigint') return Number(value);
+  if (typeof value === 'string') {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  if (typeof value === 'object') {
+    const obj = value as { toNumber?: () => number; low?: number };
+    if (typeof obj.toNumber === 'function') {
+      const n = obj.toNumber();
+      return Number.isFinite(n) ? n : undefined;
+    }
+    if (typeof obj.low === 'number') {
+      const n = Number(value);
+      return Number.isFinite(n) ? n : undefined;
+    }
+  }
+  return undefined;
+}
+
+export function extForMime(mime: string | undefined, kind: MediaKind): string {
+  const map: Record<string, string> = {
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/webp': '.webp',
+    'image/gif': '.gif',
+    'video/mp4': '.mp4',
+    'audio/ogg': '.ogg',
+    'audio/mpeg': '.mp3',
+    'application/pdf': '.pdf'
+  };
+  if (mime && map[mime]) return map[mime];
+  const kindDefault: Record<MediaKind, string> = {
+    image: '.jpg',
+    video: '.mp4',
+    audio: '.ogg',
+    document: '.bin',
+    sticker: '.webp'
+  };
+  return kindDefault[kind];
 }
 
 function extractMedia(message: proto.IMessage | null | undefined): { kind: InboundMessage['mediaKind']; name?: string; mime?: string; fallbackText: string } | null {

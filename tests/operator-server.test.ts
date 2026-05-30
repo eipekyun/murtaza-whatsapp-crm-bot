@@ -43,6 +43,13 @@ function fakeStore(saved: OutboundMessage[] = [], opts: FakeStoreOptions = {}): 
       return next;
     },
     hasWhitelistedAlias: async () => false,
+    markMediaPending: async () => {},
+    setMediaUploadStatus: async () => {},
+    markMediaDone: async () => {},
+    getMediaForServe: async () => undefined,
+    listPendingMediaByChat: async () => [],
+    listAllPendingMedia: async () => [],
+    resetStaleUploading: async () => {},
     getAppState: async (key: string) => state.get(key),
     setAppState: async (key: string, value: string) => { state.set(key, value); },
     close: () => {}
