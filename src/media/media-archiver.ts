@@ -17,7 +17,8 @@ export interface DriveResult {
 }
 
 export interface DrivePythonRunner {
-  upload(slug: string, kind: MediaKind, file: string, name?: string): Promise<DriveResult>;
+  // groupName verilirse medya <firma>/WhatsApp/Gruplar/<groupName>/<Tür>/ altına gider.
+  upload(slug: string, kind: MediaKind, file: string, name?: string, groupName?: string): Promise<DriveResult>;
   uploadInbox(sender: string, kind: MediaKind, file: string, name?: string): Promise<DriveResult>;
   download(driveId: string, outPath: string): Promise<DriveResult>;
   resolve(slug: string): Promise<DriveResult>;
@@ -79,9 +80,10 @@ export function createDrivePythonRunner(config: DrivePythonRunnerConfig): DriveP
   }
 
   return {
-    upload(slug, kind, file, name) {
+    upload(slug, kind, file, name, groupName) {
       const args = ['upload', '--slug', slug, '--kind', kind, '--file', file];
       if (name) args.push('--name', name);
+      if (groupName) args.push('--group', groupName);
       return run(args);
     },
     uploadInbox(sender, kind, file, name) {
@@ -157,8 +159,11 @@ export function createMediaArchiver(deps: MediaArchiverDeps): MediaArchiver {
     const settings = await store.getConversationSettings(tenantId, chatId);
     const slug = settings.customerSlug;
     if (slug) {
-      await enqueue(() => runUpload(messageId, localPath, `firma:${slug}`,
-        () => runner.upload(slug, kind, localPath, name)));
+      // Grup firmaya atanmışsa medya firma Drive'ında grup adıyla ayrı klasöre gider.
+      const groupName = chatId.endsWith('@g.us') ? await store.getGroupSubject(tenantId, chatId) : undefined;
+      const label = groupName ? `firma:${slug}/grup:${groupName}` : `firma:${slug}`;
+      await enqueue(() => runUpload(messageId, localPath, label,
+        () => runner.upload(slug, kind, localPath, name, groupName)));
     } else {
       const sender = senderFromChatId(chatId);
       await enqueue(() => runUpload(messageId, localPath, `inbox:${sender}`,
@@ -175,12 +180,11 @@ export function createMediaArchiver(deps: MediaArchiverDeps): MediaArchiver {
     async onCustomerAssigned(chatId: string, slug: string): Promise<void> {
       const normalized = (slug || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
       if (!normalized) return;
+      // dispatchUpload slug'ı (artık atanmış) settings'ten okur ve grup ise grup adını çözer.
       const pending = await store.listPendingMediaByChat(tenantId, chatId);
       for (const item of pending) {
         if (!item.localPath || !item.mediaKind) continue;
-        const kind = item.mediaKind;
-        await enqueue(() => runUpload(item.messageId, item.localPath, `firma:${normalized}`,
-          () => runner.upload(normalized, kind, item.localPath, item.mediaName)));
+        await dispatchUpload(item.messageId, item.chatId, item.mediaKind, item.localPath, item.mediaName);
       }
     },
 

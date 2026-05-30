@@ -80,6 +80,8 @@ export interface MessageStore {
   listAllPendingMedia(tenantId: string): Promise<PendingMedia[]>;
   // Grup detayı için: bir gruba mesaj atmış kişilerin telefon → görünen ad eşlemesi.
   getGroupMembersFromMessages(tenantId: string, chatId: string): Promise<Array<{ phone: string; name?: string }>>;
+  // Grup başlığı (Drive klasör adı için): contact_names'te kayıtlı grup adı.
+  getGroupSubject(tenantId: string, chatId: string): Promise<string | undefined>;
   resetStaleUploading(tenantId: string): Promise<void>;
   getAppState(key: string): Promise<string | undefined>;
   setAppState(key: string, value: string): Promise<void>;
@@ -355,6 +357,12 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
     ORDER BY received_at ASC
   `);
 
+  // Grup başlığı: contact_names'te 'group' kaynağıyla kaydedilmiş grup adı.
+  const groupSubjectStmt = db.prepare<[string, string], { name: string | null }>(`
+    SELECT name FROM contact_names WHERE tenant_id = ? AND jid = ? LIMIT 1
+  `);
+  const groupSubjectReader = groupSubjectStmt as unknown as { get: (t: string, j: string) => { name: string | null } | undefined };
+
   // Grup detayı: gruba mesaj atmış kişiler (telefon + en sık görünen ad).
   const groupMembersStmt = db.prepare<[string, string], { phone: string; name: string | null }>(`
     SELECT sender_phone AS phone, MIN(sender_display_name) AS name
@@ -548,6 +556,11 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
         phone: row.phone,
         name: row.name && row.name.trim() ? row.name.trim() : undefined
       }));
+    },
+
+    async getGroupSubject(tenantId: string, chatId: string): Promise<string | undefined> {
+      const name = groupSubjectReader.get(tenantId, chatId)?.name;
+      return name && name.trim() ? name.trim() : undefined;
     },
 
     async resetStaleUploading(tenantId: string): Promise<void> {

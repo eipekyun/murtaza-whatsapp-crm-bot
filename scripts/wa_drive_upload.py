@@ -192,6 +192,13 @@ def upload_to_target(svc, target: str, file_path: Path, name: str) -> dict:
     return {"status": "uploaded", "drive_id": f.get("id"), "link": f.get("webViewLink"), "folder_id": target}
 
 
+def safe_folder(value: str) -> str:
+    """Drive klasor adi: '/' ve kontrol karakterlerini bosluga cevir, kirp. Turkce harfler korunur."""
+    cleaned = re.sub(r"[\\/\x00-\x1f]", " ", value or "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:80] or "Grup"
+
+
 def cmd_upload(args) -> dict:
     p = Path(args.file)
     if not p.exists():
@@ -201,7 +208,12 @@ def cmd_upload(args) -> dict:
         return {"status": "error", "error": f"'{args.slug}' icin Drive root bulunamadi"}
     folder_name = KIND_FOLDER.get(args.kind, "Diger")
     svc = get_service()
-    target = ensure_path(svc, root, ["WhatsApp", folder_name])
+    group = (getattr(args, "group", "") or "").strip()
+    if group:
+        # Gruba eşli firma medyasi: <root>/WhatsApp/Gruplar/<grup adi>/<Tur>/
+        target = ensure_path(svc, root, ["WhatsApp", "Gruplar", safe_folder(group), folder_name])
+    else:
+        target = ensure_path(svc, root, ["WhatsApp", folder_name])
     name = (args.name or "").strip() or p.name
     return upload_to_target(svc, target, p, name)
 
@@ -261,6 +273,7 @@ def main() -> None:
     u.add_argument("--kind", required=True)
     u.add_argument("--file", required=True)
     u.add_argument("--name", default="")
+    u.add_argument("--group", default="")
     ui = sub.add_parser("upload-inbox")
     ui.add_argument("--sender", required=True)
     ui.add_argument("--kind", required=True)

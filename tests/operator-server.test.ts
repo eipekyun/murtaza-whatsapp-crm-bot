@@ -50,6 +50,7 @@ function fakeStore(saved: OutboundMessage[] = [], opts: FakeStoreOptions = {}): 
     listPendingMediaByChat: async () => [],
     listAllPendingMedia: async () => [],
     getGroupMembersFromMessages: async () => [],
+    getGroupSubject: async () => undefined,
     resetStaleUploading: async () => {},
     getAppState: async (key: string) => state.get(key),
     setAppState: async (key: string, value: string) => { state.set(key, value); },

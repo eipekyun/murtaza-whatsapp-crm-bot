@@ -8,6 +8,7 @@ import { createSqliteMessageStore } from './store/sqlite-message-store.js';
 import { createOperatorHttpServer, type GroupInfo, type MediaFile } from './http/operator-server.js';
 import { startBaileysClient, type BaileysClientOptions } from './whatsapp/baileys-client.js';
 import { createDrivePythonRunner, createMediaArchiver } from './media/media-archiver.js';
+import { normalizePhone, normalizeWhitelist } from './phone.js';
 import type { MediaKind } from './types.js';
 import type { WASocket } from '@whiskeysockets/baileys';
 
@@ -117,6 +118,13 @@ async function main(): Promise<void> {
       mediaIncomingDir: config.mediaIncomingDir,
       archiveKinds: new Set<MediaKind>(config.archiveKinds),
       maxMediaBytes: config.maxMediaBytes,
+      // Arşivle: gönderen whitelist'te VEYA sohbet (grup/bireysel) bir firmaya atanmış.
+      // Böylece atanmış grubun whitelist dışı üyelerinin medyası da firmanın Drive'ına gider.
+      shouldArchiveMedia: async (chatId, senderPhone) => {
+        if (normalizeWhitelist(config.whitelistPhones).has(normalizePhone(senderPhone))) return true;
+        const settings = await store.getConversationSettings(config.tenantId, chatId);
+        return Boolean(settings.customerSlug);
+      },
       onIncomingMedia: (event) => mediaArchiver.onIncomingMedia(event),
       onMediaSkipped: (event: { messageId: string }) => store.setMediaUploadStatus(config.tenantId, event.messageId, 'skipped')
     } : {})

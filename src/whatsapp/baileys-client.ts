@@ -11,7 +11,6 @@ import makeWASocket, {
 import type { RuntimeConfig } from '../config.js';
 import type { MessageRouter } from '../router.js';
 import type { InboundMessage, MediaKind, OutboundMessage } from '../types.js';
-import { normalizePhone, normalizeWhitelist } from '../phone.js';
 import { writeQrArtifacts } from './qr-artifacts.js';
 import { shouldReconnectAfterClose } from './reconnect-policy.js';
 
@@ -54,6 +53,9 @@ export interface BaileysClientOptions {
   archiveKinds?: Set<MediaKind>;
   // Gelen medya için indirme üst sınırı (bytes). Aşılırsa indirilmez. undefined = limitsiz.
   maxMediaBytes?: number;
+  // Arşivleme izni: true ise medya indirilip arşivlenir. Whitelist gönderen VEYA sohbet bir
+  // firmaya atanmış (grup→firma medyası için whitelist dışı üyeler de dahil) → true.
+  shouldArchiveMedia?: (chatId: string, senderPhone: string) => Promise<boolean> | boolean;
 }
 
 export async function startBaileysClient(config: RuntimeConfig, router: MessageRouter, options: BaileysClientOptions = {}): Promise<WASocket> {
@@ -160,10 +162,9 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
       void resolveGroupName(inbound.chatId);
 
       // Sadece CANLI inbound medya arşivlenir; messaging-history.set'e EKLENMEZ (toplu indirme yasak).
-      // Güvenlik: yalnızca whitelist'teki tanıdık gönderenlerin medyası indirilip arşivlenir.
-      // Aksi halde tanımadık/spam gönderen kullanıcının Drive'ına yazabilir (yetkisiz depolama).
-      const senderWhitelisted = normalizeWhitelist(config.whitelistPhones).has(normalizePhone(inbound.senderPhone));
-      if (inbound.mediaKind && options.onIncomingMedia && senderWhitelisted && (options.archiveKinds?.has(inbound.mediaKind) ?? true)) {
+      // Arşivleme izni archiveInboundMedia içinde shouldArchiveMedia ile verilir (whitelist VEYA
+      // sohbet bir firmaya atanmış — atanmış grubun whitelist dışı üyelerinin medyası da dahil).
+      if (inbound.mediaKind && options.onIncomingMedia && (options.archiveKinds?.has(inbound.mediaKind) ?? true)) {
         void archiveInboundMedia(sock, raw, inbound, options);
       }
 
@@ -341,6 +342,17 @@ async function archiveInboundMedia(
 ): Promise<void> {
   const kind = inbound.mediaKind;
   if (!kind) return;
+  // Arşivleme izni: whitelist gönderen VEYA firmaya atanmış sohbet. İzin yoksa indirme bile yapma
+  // (tanımadık/spam gönderenin diske/Drive'a yazmasını önler).
+  if (options.shouldArchiveMedia) {
+    try {
+      const allowed = await options.shouldArchiveMedia(inbound.chatId, inbound.senderPhone);
+      if (!allowed) return;
+    } catch (error) {
+      console.error('Medya arşivleme izni kontrolü hatası:', error instanceof Error ? error.message : error);
+      return;
+    }
+  }
   // Boyut limiti: indirmeden ÖNCE mesaj node'undaki fileLength'e bak. Aşıyorsa indirme
   // (disk/RAM DoS koruması). fileLength yoksa best-effort indir.
   const fileLength = mediaFileLength(raw.message);

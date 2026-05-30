@@ -10,12 +10,14 @@ function fakeStore(): MessageStore & {
   __local: Map<string, string>;
   __settings: Map<string, ConversationSettings>;
   __pending: Map<string, PendingMedia[]>;
+  __subjects: Map<string, string>;
 } {
   const status = new Map<string, MediaUploadStatus>();
   const done = new Map<string, { driveId: string; driveUrl: string }>();
   const local = new Map<string, string>();
   const settings = new Map<string, ConversationSettings>();
   const pending = new Map<string, PendingMedia[]>();
+  const subjects = new Map<string, string>();
   const base: Partial<MessageStore> = {
     saveInbound: async () => {},
     saveOutbound: async () => {},
@@ -42,13 +44,14 @@ function fakeStore(): MessageStore & {
     listPendingMediaByChat: async (_t: string, chatId: string) => pending.get(chatId) ?? [],
     listAllPendingMedia: async () => [...pending.values()].flat(),
     getGroupMembersFromMessages: async () => [],
+    getGroupSubject: async (_t: string, chatId: string) => subjects.get(chatId),
     resetStaleUploading: async () => {},
     getAppState: async () => undefined,
     setAppState: async () => {},
     close: () => {}
   };
   const store = base as MessageStore;
-  return Object.assign(store, { __status: status, __done: done, __local: local, __settings: settings, __pending: pending });
+  return Object.assign(store, { __status: status, __done: done, __local: local, __settings: settings, __pending: pending, __subjects: subjects });
 }
 
 function mockRunner(
@@ -97,9 +100,24 @@ describe('media archiver', () => {
 
     await archiver.onIncomingMedia({ chatId: 'c1', messageId: 'm1', mediaKind: 'image', localPath: '/tmp/m1.jpg', mediaName: 'm1.jpg' });
 
-    expect(runner.upload).toHaveBeenCalledWith('lavanda', 'image', '/tmp/m1.jpg', 'm1.jpg');
+    expect(runner.upload).toHaveBeenCalledWith('lavanda', 'image', '/tmp/m1.jpg', 'm1.jpg', undefined);
     expect(store.__status.get('m1')).toBe('done');
     expect(store.__done.get('m1')).toEqual({ driveId: 'drive-1', driveUrl: 'https://drive/x' });
+  });
+
+  it('group assigned to a firma uploads with the group name (firma Drive / Gruplar / <grup>)', async () => {
+    const store = fakeStore();
+    const gid = '120363407358572607@g.us';
+    store.__settings.set(gid, { botEnabled: true, tags: [], readReceipt: 'on_reply', customerSlug: 'lavanda' });
+    store.__subjects.set(gid, 'Atölye Bambini - Dijital');
+    const runner = mockRunner(() => ({ status: 'uploaded', drive_id: 'g1', link: 'https://drive/g' }));
+    const archiver = createMediaArchiver({ store, tenantId: 'esmark-test', runner });
+
+    await archiver.onIncomingMedia({ chatId: gid, messageId: 'gm', mediaKind: 'image', localPath: '/tmp/gm.jpg', mediaName: 'gm.jpg' });
+
+    expect(runner.upload).toHaveBeenCalledWith('lavanda', 'image', '/tmp/gm.jpg', 'gm.jpg', 'Atölye Bambini - Dijital');
+    expect(runner.uploadInbox).not.toHaveBeenCalled();
+    expect(store.__status.get('gm')).toBe('done');
   });
 
   it('marks error when upload returns skip WITHOUT drive_id (defensive branch)', async () => {
@@ -116,6 +134,7 @@ describe('media archiver', () => {
 
   it('queue isolation: first item error does NOT block the second upload', async () => {
     const store = fakeStore();
+    store.__settings.set('c1', { botEnabled: true, tags: [], readReceipt: 'on_reply', customerSlug: 'lavanda' });
     store.__pending.set('c1', [
       { messageId: 'm1', chatId: 'c1', mediaKind: 'image', localPath: '/tmp/m1.jpg' },
       { messageId: 'm2', chatId: 'c1', mediaKind: 'document', localPath: '/tmp/m2.pdf' }
@@ -140,7 +159,7 @@ describe('media archiver', () => {
 
     await archiver.requeuePending();
 
-    expect(runner.upload).toHaveBeenCalledWith('lavanda', 'image', '/tmp/mf.jpg', undefined);
+    expect(runner.upload).toHaveBeenCalledWith('lavanda', 'image', '/tmp/mf.jpg', undefined, undefined);
     expect(runner.uploadInbox).toHaveBeenCalledWith('905551112233', 'document', '/tmp/mi.pdf', undefined);
     expect(store.__status.get('mf')).toBe('done');
     expect(store.__status.get('mi')).toBe('done');
@@ -148,6 +167,7 @@ describe('media archiver', () => {
 
   it('onCustomerAssigned uploads all pending media for the chat', async () => {
     const store = fakeStore();
+    store.__settings.set('c1', { botEnabled: true, tags: [], readReceipt: 'on_reply', customerSlug: 'lavanda-lavander' });
     store.__pending.set('c1', [
       { messageId: 'm1', chatId: 'c1', mediaKind: 'image', localPath: '/tmp/m1.jpg' },
       { messageId: 'm2', chatId: 'c1', mediaKind: 'document', mediaName: 'teklif.pdf', localPath: '/tmp/m2.pdf' }
