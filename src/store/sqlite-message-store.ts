@@ -196,6 +196,9 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
     ORDER BY received_at ASC
   `);
 
+  // Bireysel sohbet: aynı kişi @lid ve telefon JID olarak iki chat_id'de görünebilir;
+  // sender_display_name ile birleştirilir. ANCAK gruplar (@g.us) bu birleştirmeye DAHİL
+  // EDİLMEZ — grupta "Ersin" yazması, Ersin'in bireysel sohbetini gruba çekmemeli.
   const listByChat = db.prepare<[string, string, string, string], MessageRow>(`
     WITH selected_names AS (
       SELECT DISTINCT sender_display_name AS display_name
@@ -210,10 +213,18 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
       SELECT DISTINCT chat_id
       FROM messages
       WHERE sender_display_name IN (SELECT display_name FROM selected_names)
+        AND chat_id NOT LIKE '%@g.us'
     )
     ${selectColumns}
     WHERE tenant_id = ?
       AND chat_id IN (SELECT chat_id FROM alias_chats)
+    ORDER BY received_at ASC
+  `);
+
+  // Grup sohbeti: isim-birleştirme YOK, yalnızca o grubun mesajları (tam chat_id eşleşmesi).
+  const listByChatExact = db.prepare<[string, string], MessageRow>(`
+    ${selectColumns}
+    WHERE tenant_id = ? AND chat_id = ?
     ORDER BY received_at ASC
   `);
 
@@ -404,6 +415,10 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
     },
 
     async listMessagesByChat(tenantId: string, chatId: string): Promise<StoredMessage[]> {
+      // Gruplar tam eşleşme (birleştirme yok); bireysel sohbetler LID/PN isim-birleştirmeli.
+      if (chatId.endsWith('@g.us')) {
+        return listByChatExact.all(tenantId, chatId).map(rowToStoredMessage);
+      }
       return listByChat.all(tenantId, chatId, chatId, tenantId).map(rowToStoredMessage);
     },
 

@@ -45,4 +45,36 @@ describe('sqlite message store', () => {
 
     store.close();
   });
+
+  it('group chat (@g.us) does NOT pull in individual chats that share a sender name', async () => {
+    tmp = mkdtempSync(join(tmpdir(), 'murtaza-wa-'));
+    const store = createSqliteMessageStore(join(tmp, 'messages.sqlite'));
+
+    // Ersin'in bireysel sohbeti
+    await store.saveInbound(message({ messageId: 'i-1', chatId: '905322013401@s.whatsapp.net', senderPhone: '905322013401', senderDisplayName: 'Ersin', text: 'bireysel' }));
+    // Aynı isimle (Ersin) grup mesajı + grupta başka kişi
+    await store.saveInbound(message({ messageId: 'g-1', chatId: '120363407358572607@g.us', senderPhone: '905322013401', senderDisplayName: 'Ersin', text: 'grup-ersin' }));
+    await store.saveInbound(message({ messageId: 'g-2', chatId: '120363407358572607@g.us', senderPhone: '905312153333', senderDisplayName: 'Irem', text: 'grup-irem' }));
+
+    const groupMsgs = await store.listMessagesByChat('esmark-test', '120363407358572607@g.us');
+    // Grup yalnızca kendi 2 mesajını içermeli; Ersin'in bireysel sohbeti SIZMAMALI.
+    expect(groupMsgs.map((m) => m.messageId).sort()).toEqual(['g-1', 'g-2']);
+
+    store.close();
+  });
+
+  it('individual chat merges same-name LID/PN chats but excludes groups', async () => {
+    tmp = mkdtempSync(join(tmpdir(), 'murtaza-wa-'));
+    const store = createSqliteMessageStore(join(tmp, 'messages.sqlite'));
+
+    await store.saveInbound(message({ messageId: 'pn-1', chatId: '905322013401@s.whatsapp.net', senderPhone: '905322013401', senderDisplayName: 'Ersin', text: 'pn' }));
+    await store.saveInbound(message({ messageId: 'lid-1', chatId: '29132796747799@lid', senderPhone: '29132796747799', senderDisplayName: 'Ersin', text: 'lid' }));
+    await store.saveInbound(message({ messageId: 'grp-1', chatId: '120363407358572607@g.us', senderPhone: '905322013401', senderDisplayName: 'Ersin', text: 'grup' }));
+
+    const ids = (await store.listMessagesByChat('esmark-test', '905322013401@s.whatsapp.net')).map((m) => m.messageId).sort();
+    // LID birleşir (pn-1 + lid-1), grup mesajı (grp-1) sızmaz.
+    expect(ids).toEqual(['lid-1', 'pn-1']);
+
+    store.close();
+  });
 });

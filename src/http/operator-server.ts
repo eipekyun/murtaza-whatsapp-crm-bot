@@ -799,7 +799,15 @@ body{margin:0;background:var(--bg);color:var(--text)}
       var origin = m.direction === 'outbound' ? (m.origin || 'manual') : '';
       var el = document.createElement('div');
       el.className = 'msg ' + m.direction + ' ' + origin;
-      var label = m.direction === 'inbound' ? 'Müşteri' : (origin === 'bot' ? 'MURTAZA Bot' : origin === 'self' ? 'Sen (telefon)' : 'Sen / Operatör');
+      // Grupta her gelen mesajın etiketi = gerçek gönderenin adı (grupta birden fazla kişi var);
+      // bireysel sohbette tek kişi olduğundan generic "Müşteri" yeterli.
+      var isGroupMsg = (m.chatId || '').slice(-5) === '@g.us';
+      var label;
+      if (m.direction === 'inbound') {
+        label = isGroupMsg ? (m.senderDisplayName || m.senderPhone || 'Üye') : 'Müşteri';
+      } else {
+        label = origin === 'bot' ? 'MURTAZA Bot' : (origin === 'self' ? 'Sen (telefon)' : 'Sen / Operatör');
+      }
 
       var labelEl = document.createElement('span'); labelEl.className='label'; labelEl.textContent = label;
       el.appendChild(labelEl);
