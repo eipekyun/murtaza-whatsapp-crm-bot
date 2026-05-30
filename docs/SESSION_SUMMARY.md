@@ -37,6 +37,8 @@ Aynı gün panel testinde kullanıcı grup sorunlarını bildirdi → 3 commit:
 
 56 test. Canlı doğrulama: grup API 57→4, sohbet listesi 68→69 (Ersin geri), grup detay 5 üye gerçek TR numaralarıyla (905322013401 Ersin [admin], 905312153333 Irem [admin]...).
 
+- **`71e8574` feat — grup → firma eşli medya:** Grup bir firmaya atanınca (sağ panel "Firma" select → `customerSlug`) gruptan gelen medya firmanın Drive'ında **`<firma_root>/WhatsApp/Gruplar/<grup adı>/<Tür>/`** altına gider (grup adıyla ayrı). **Whitelist guard genişletildi:** arşivle = gönderen whitelist'te **VEYA** sohbet bir firmaya atanmış → atanmış grubun whitelist DIŞI üyelerinin (Irem vb.) medyası da firma Drive'ına gider (geçen oturumun "açık not"u kapandı). Yeni: `shouldArchiveMedia` callback (baileys→index whitelist|slug), `store.getGroupSubject`, `media-archiver` upload groupName param + `dispatchUpload` grup çözümü, `onCustomerAssigned` dispatchUpload'a sadeleşti, python `cmd_upload --group` + `safe_folder`. 57 test. Python Drive doğrulandı: `Lavanda-Lavander/WhatsApp/Gruplar/Atölye Bambini - Dijital/Belgeler`.
+
 ## 2026-05-29 akşam — bot canlı + WhatsApp-benzeri panel (özet)
 
 Bot, donmuş PoC'tan **VPS'te canlı çalışan, WhatsApp-benzeri operatör paneli** haline getirildi. 7 commit:
