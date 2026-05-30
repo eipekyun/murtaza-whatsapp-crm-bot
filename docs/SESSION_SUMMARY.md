@@ -1,8 +1,29 @@
 # SESSION_SUMMARY — murtaza-whatsapp-crm-bot
 
-Son güncelleme: 2026-05-29 (akşam oturumu)
+Son güncelleme: 2026-05-30 (medya Drive arşivleme + MURTAZA inbox fallback)
 
-## Bu oturumda ne yapıldı (özet)
+## 2026-05-30 — Gelen medya Drive arşivleme + atanmamış için MURTAZA inbox fallback
+
+Commit `e32e6f3` (local, remote yok). Bot bu özellikle canlıda çalışıyor.
+
+**Ne yapıldı:** Gelen görsel/video/ses/doküman yerel geçici dizine indirilir; sohbet müşteriye atanmışsa firmanın Drive'ına, atanmamışsa kullanıcının kendi Drive'ında `Work/MURTAZA/WhatsApp/Gelen-Kutusu/<gönderen>/<Tür>/` altına yüklenir (python `wa_drive_upload.py upload-inbox`). Başarılı upload → yerel kopya silinir, panelde Drive linki + tıklanır aç/indir menüsü (Drive'dan serve). Drive yüklemeleri seri kuyrukta.
+
+- Drive auth: `~/.hermes/drive_token.json` (hesap **eipekyun@gmail.com**, kişisel — ESMARK değil).
+- Klasör resolve: firma kartındaki Drive folder ID (firma) veya kök "Work" altında "MURTAZA" ensure (inbox).
+- Kullanıcı kararları: gönderen-bazlı klasör; atama sonrası geçmiş inbox'ta kalır (taşıma yok).
+
+**Adversarial review (4 lens / 21 bulgu) sonrası düzeltilen HIGH/MEDIUM:**
+- HIGH whitelist guard: yalnızca whitelist gönderen medyası arşivlenir → status broadcast / tanımadık spam Drive'a yazamaz (canlıda kanıtlandı: story video'ları s=null kaldı)
+- HIGH `/qr` + `/qr.png` auth guard + query-token desteği (img/QR sayfası Bearer header gönderemez) → açık QR ile hesap ele geçirme kapatıldı
+- HIGH restart recovery: bekleyen+başarısız medya startup'ta `mediaArchiver.requeuePending()` ile kuyruğa
+- markMediaPending duplicate-upsert guard; runUpload try-catch; find_folder `orderBy=createdTime` (duplicate race tutarlılık); grup JID `grup-` prefix; operator token artık log'a basılmaz
+- **Atlanan (gerekçeli):** parent_id injection (FOLDER_ID_RE zaten `[A-Za-z0-9_-]` sınırlı), in-flight atama (kullanıcının "fallback'te kalsın" kararıyla uyumlu)
+
+**Doğrulama:** tsc temiz, 52 test (44→52). Canlı end-to-end: gerçek +1 görseli `Gelen-Kutusu/905322013401/Görseller/3EB0A724…jpg`, panelden Drive serve HTTP 200 (1024x1024 jpeg). Panel tıklama ilk denemede çalışmadı = **tarayıcı cache** (sayfa yenileyince düzeldi, kod sorunu değil).
+
+**Açık not (gelecek iş):** Medya arşivleme şu an SADECE whitelist (2 numara: +1 + Ersin). İleride müşteri sohbetleri (whitelist dışı, atanmış) eklenince guard genişletilmeli: "whitelist İÇİ VEYA sohbet bir firmaya atanmış".
+
+## 2026-05-29 akşam — bot canlı + WhatsApp-benzeri panel (özet)
 
 Bot, donmuş PoC'tan **VPS'te canlı çalışan, WhatsApp-benzeri operatör paneli** haline getirildi. 7 commit:
 
