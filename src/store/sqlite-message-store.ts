@@ -239,7 +239,15 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
     ), enriched AS (
       SELECT
         m.*,
-        COALESCE('name:' || lower(chat_names.display_name), 'chat:' || m.chat_id) AS identity_key,
+        -- Gruplar (@g.us) HER ZAMAN kendi chat_id'leriyle ayrı kimlik alır; isim-bazlı
+        -- birleştirmeye girmez. Aksi halde grupta geçen bir isim (örn. "Ersin"), aynı isimli
+        -- kişinin bireysel sohbetiyle aynı identity_key'e düşüp onu listeden siliyordu.
+        CASE
+          WHEN m.chat_id LIKE '%@g.us' THEN 'chat:' || m.chat_id
+          WHEN chat_names.display_name IS NOT NULL AND chat_names.display_name != ''
+            THEN 'name:' || lower(chat_names.display_name)
+          ELSE 'chat:' || m.chat_id
+        END AS identity_key,
         chat_names.display_name AS identity_display_name
       FROM messages m
       LEFT JOIN chat_names ON chat_names.chat_id = m.chat_id

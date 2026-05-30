@@ -63,6 +63,21 @@ describe('sqlite message store', () => {
     store.close();
   });
 
+  it('listConversations keeps a group separate from an individual chat that shares a sender name', async () => {
+    tmp = mkdtempSync(join(tmpdir(), 'murtaza-wa-'));
+    const store = createSqliteMessageStore(join(tmp, 'messages.sqlite'));
+
+    await store.saveInbound(message({ messageId: 'i-1', chatId: '905322013401@s.whatsapp.net', senderPhone: '905322013401', senderDisplayName: 'Ersin', text: 'bireysel', receivedAt: new Date('2026-05-12T10:00:00.000Z') }));
+    await store.saveInbound(message({ messageId: 'g-1', chatId: '120363407358572607@g.us', senderPhone: '905322013401', senderDisplayName: 'Ersin', text: 'grup', receivedAt: new Date('2026-05-12T11:00:00.000Z') }));
+
+    const ids = (await store.listConversations('esmark-test')).map((c) => c.chatId).sort();
+    // İkisi de listede olmalı; grup, aynı isimli bireysel sohbeti gizlememeli.
+    expect(ids).toContain('905322013401@s.whatsapp.net');
+    expect(ids).toContain('120363407358572607@g.us');
+
+    store.close();
+  });
+
   it('individual chat merges same-name LID/PN chats but excludes groups', async () => {
     tmp = mkdtempSync(join(tmpdir(), 'murtaza-wa-'));
     const store = createSqliteMessageStore(join(tmp, 'messages.sqlite'));
