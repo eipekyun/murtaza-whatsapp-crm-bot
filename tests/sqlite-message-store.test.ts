@@ -107,4 +107,19 @@ describe('sqlite message store', () => {
 
     store.close();
   });
+
+  it('listConversations excludes WhatsApp status broadcasts', async () => {
+    tmp = mkdtempSync(join(tmpdir(), 'murtaza-wa-'));
+    const store = createSqliteMessageStore(join(tmp, 'messages.sqlite'));
+
+    await store.saveInbound(message({ messageId: 'real-1', chatId: '905551112233@s.whatsapp.net', senderPhone: '905551112233', senderDisplayName: 'Müşteri' }));
+    // Geçmişte kaydedilmiş bir status yayını (yeni gelenler zaten baileys handler'ında drop edilir).
+    await store.saveInbound(message({ messageId: 'status-1', chatId: 'status@broadcast', senderPhone: '905999998877', senderDisplayName: 'Birisi' }));
+
+    const ids = (await store.listConversations('esmark-test')).map((c) => c.chatId);
+    expect(ids).toContain('905551112233@s.whatsapp.net');
+    expect(ids).not.toContain('status@broadcast');
+
+    store.close();
+  });
 });

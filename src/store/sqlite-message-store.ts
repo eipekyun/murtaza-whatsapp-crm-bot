@@ -285,6 +285,7 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
       FROM messages m
       LEFT JOIN chat_names ON chat_names.chat_id = m.chat_id
       WHERE m.tenant_id = ?
+        AND m.chat_id != 'status@broadcast'
     ), latest_per_identity AS (
       SELECT identity_key, MAX(received_at) AS latest_at
       FROM enriched

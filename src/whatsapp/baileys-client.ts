@@ -148,6 +148,8 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
 
   sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const raw of messages) {
+      // WhatsApp Durum/Status (story) yayınları CRM akışına girmez — kaydetme, arşivleme, listede gösterme.
+      if (raw.key?.remoteJid === 'status@broadcast') continue;
       if (raw.key?.fromMe) {
         const selfMessageId = raw.key.id ?? '';
         if (selfMessageId && botSentIds.has(selfMessageId)) continue;
