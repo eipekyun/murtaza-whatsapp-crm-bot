@@ -39,4 +39,49 @@ describe('runtime config', () => {
 
     expect(config.groupMapPath).toBe('/custom/map.md');
   });
+
+  it('falls back perfexQueryPython to BOT_DRIVE_PYTHON, then to pipx default', () => {
+    const fromDrive = loadConfigFromEnv({ BOT_DRIVE_PYTHON: '/opt/py/python3' });
+    expect(fromDrive.perfexQueryPython).toBe('/opt/py/python3');
+
+    const fallback = loadConfigFromEnv({});
+    expect(fallback.perfexQueryPython).toContain('hermes-agent');
+  });
+
+  it('honors explicit BOT_PERFEX_PYTHON over BOT_DRIVE_PYTHON', () => {
+    const config = loadConfigFromEnv({
+      BOT_PERFEX_PYTHON: '/usr/bin/python3',
+      BOT_DRIVE_PYTHON: '/opt/py/python3'
+    });
+
+    expect(config.perfexQueryPython).toBe('/usr/bin/python3');
+  });
+
+  it('defaults perfexQueryScript to scripts/perfex-query.py and honors override', () => {
+    const fallback = loadConfigFromEnv({});
+    expect(fallback.perfexQueryScript.endsWith('scripts/perfex-query.py')).toBe(true);
+
+    const override = loadConfigFromEnv({ BOT_PERFEX_QUERY_SCRIPT: '/custom/q.py' });
+    expect(override.perfexQueryScript).toBe('/custom/q.py');
+  });
+
+  it('expands ~ in perfexOpsEnvPath and honors override', () => {
+    const fallback = loadConfigFromEnv({});
+    expect(fallback.perfexOpsEnvPath.startsWith('~')).toBe(false);
+    expect(fallback.perfexOpsEnvPath.endsWith('.config/murtaza-vps-ops.env')).toBe(true);
+
+    const override = loadConfigFromEnv({ BOT_PERFEX_OPS_ENV: '/srv/ops.env' });
+    expect(override.perfexOpsEnvPath).toBe('/srv/ops.env');
+  });
+
+  // Wiring sözleşmesi (index.ts): createPerfexReader bu üç alanı doğrudan tüketir
+  // ({ python, scriptPath, opsEnvPath }). Hepsi non-empty string olmalı; aksi halde
+  // subprocess köprüsü sessizce yanlış path'le çağrılır.
+  it('provides all three perfex* fields createPerfexReader consumes (non-empty strings)', () => {
+    const config = loadConfigFromEnv({});
+    for (const value of [config.perfexQueryPython, config.perfexQueryScript, config.perfexOpsEnvPath]) {
+      expect(typeof value).toBe('string');
+      expect(value.length).toBeGreaterThan(0);
+    }
+  });
 });

@@ -86,6 +86,29 @@ export interface ProjectOption {
   name: string;
 }
 
+// Perfex READ-ONLY sorgu sonuçları (scripts/perfex-query.py JSON sözleşmesi).
+// status: 1=Başlamadı, 2=Devam, 3=Test, 4=Geri Bildirim, 5=Tamamlandı
+export interface PerfexTask {
+  id: number;
+  name: string;
+  priority: number;
+  status: number;
+  statusLabel: string;
+  dueDate?: string;
+}
+
+export interface PerfexProjectStatus {
+  id: number;
+  name: string;
+  status: number;
+}
+
+export interface PerfexQueryResult {
+  tasks: PerfexTask[];
+  projects: PerfexProjectStatus[];
+  error: string | null;
+}
+
 export interface ConversationSummary {
   chatId: string;
   displayName: string;

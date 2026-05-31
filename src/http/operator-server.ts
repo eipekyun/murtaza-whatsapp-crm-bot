@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { createReadStream, readFileSync, rmSync } from 'node:fs';
 import type { MessageStore } from '../store/sqlite-message-store.js';
-import type { ProjectOption } from '../types.js';
+import type { PerfexQueryResult, ProjectOption } from '../types.js';
 import { normalizePhone } from '../phone.js';
 
 export interface WhatsAppSendPayload {
@@ -63,6 +63,9 @@ export interface OperatorServerOptions {
   onConversationCrmChanged?: (chatId: string) => Promise<void> | void;
   getMediaFile?: (messageId: string) => Promise<MediaFile | undefined>;
   getGroupInfo?: (chatId: string) => Promise<GroupInfo | undefined>;
+  // Sohbete atanmış Perfex firmasının READ-ONLY görev/proje durumu (on-demand panel butonu).
+  // Wiring (Dalga 3) chatId → perfexClientId çözümünü + PerfexReader çağrısını burada bağlar.
+  getPerfexTasks?: (chatId: string) => Promise<PerfexQueryResult>;
 }
 
 export function createOperatorHttpServer(options: OperatorServerOptions): Server {
@@ -148,6 +151,15 @@ export function createOperatorHttpServer(options: OperatorServerOptions): Server
         const customerSlug = String(parsed.searchParams.get('customerSlug') ?? '').trim();
         const projects = (customerSlug && options.listProjects) ? await options.listProjects(customerSlug) : [];
         return sendJson(res, { projects });
+      }
+      if (req.method === 'GET' && parsed.pathname === '/api/perfex-tasks') {
+        const chatId = parsed.searchParams.get('chatId');
+        if (!chatId) return sendJson(res, { error: 'chatId_required' }, 400);
+        // getPerfexTasks yoksa Perfex köprüsü devre dışı; PerfexQueryResult şekline uyumlu zarf dön.
+        const result = options.getPerfexTasks
+          ? await options.getPerfexTasks(chatId)
+          : { tasks: [], projects: [], error: 'perfex devre dışı' };
+        return sendJson(res, result);
       }
       if (req.method === 'GET' && parsed.pathname === '/api/group-info') {
         const chatId = parsed.searchParams.get('chatId');
@@ -468,6 +480,18 @@ body{margin:0;background:var(--bg);color:var(--text)}
 .detailHero{display:flex;align-items:center;gap:14px;margin-bottom:10px}
 .detailHero .avatar{width:56px;height:56px;font-size:22px}
 .notice{background:rgba(245,197,66,.12);border:1px solid rgba(245,197,66,.4);color:#f5c542;border-radius:8px;padding:8px 10px;font-size:12px;margin:8px 0}
+.taskRow{display:flex;gap:8px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--line)}
+.taskRow:last-child{border-bottom:0}
+.taskMain{min-width:0;flex:1}
+.taskName{font-size:13px;word-break:break-word}
+.taskId{color:var(--muted);font-size:11px}
+.taskStatus{font-size:11px;color:var(--muted);margin-top:2px}
+.prioBadge{flex:0 0 auto;font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;align-self:center}
+.prio-1{background:#2a3942;color:#aebac1}
+.prio-2{background:#1f4d3a;color:#7fe3b8}
+.prio-3{background:#5a4a1a;color:#f5c542}
+.prio-4{background:#5a2330;color:#ff9b9b}
+.taskErr{color:#ff9b9b;font-size:12px}
 
 @media(max-width:900px){.app{grid-template-columns:1fr}.right{display:none}.left{display:none}.msg{max-width:88%}}
 </style>
@@ -545,6 +569,14 @@ body{margin:0;background:var(--bg);color:var(--text)}
           <button id="saveConvSettings" class="btn primary">Konuşma ayarını kaydet</button>
           <span class="saveStatus" id="convSaveStatus"></span>
         </div>
+      </div>
+
+      <div class="card">
+        <h3>Perfex görevler</h3>
+        <p class="sub">Atanan firmanın açık görev/proje durumu. CRM'e SSH ile bağlanır (~1-2 sn), bu yüzden istediğinde getir.</p>
+        <button id="loadPerfexTasks" class="btn primary" style="margin-top:6px">Perfex görevlerini getir</button>
+        <div class="sub" id="perfexTasksStatus" style="margin-top:8px"></div>
+        <div id="perfexTasksList" style="margin-top:8px"></div>
       </div>
 
       <div class="card">
@@ -732,6 +764,74 @@ body{margin:0;background:var(--bg);color:var(--text)}
     } catch(e){}
   }
 
+  // Öncelik etiketi (Perfex: 1=Düşük 2=Orta 3=Yüksek 4=Acil). Bilinmeyen → "—".
+  function priorityLabel(p){
+    if (p === 1) return 'Düşük';
+    if (p === 2) return 'Orta';
+    if (p === 3) return 'Yüksek';
+    if (p === 4) return 'Acil';
+    return '—';
+  }
+
+  // ON-DEMAND: sohbet açılışında OTOMATİK çağrılmaz; operatör butona basınca çalışır (SSH latency).
+  // Liste read-only — Faz 2 yalnız görüntüleme, görev tıklanamaz/aksiyon yok.
+  async function loadPerfexTasks(){
+    if (!selectedChatId) { alert('Önce konuşma seç'); return; }
+    var status = $('perfexTasksStatus');
+    var list = $('perfexTasksList');
+    list.innerHTML = '';
+    status.textContent = 'Perfex sorgulanıyor…';
+    var data;
+    try {
+      data = await api('/api/perfex-tasks?chatId=' + encodeURIComponent(selectedChatId));
+    } catch (err) {
+      status.textContent = 'CRM erişilemedi: ' + err.message;
+      return;
+    }
+    if (data.error) {
+      status.textContent = data.error === 'firma atanmamış'
+        ? 'Bu sohbete firma atanmamış — önce firma seç.'
+        : 'CRM erişilemedi: ' + data.error;
+      return;
+    }
+    var tasks = data.tasks || [];
+    var projects = data.projects || [];
+    var summary = tasks.length + ' görev';
+    if (projects.length) summary += ' · ' + projects.length + ' proje';
+    status.textContent = summary;
+    if (!tasks.length) {
+      var none = document.createElement('div');
+      none.className = 'sub';
+      none.textContent = 'Açık görev yok.';
+      list.appendChild(none);
+      return;
+    }
+    tasks.forEach(function(t){
+      var row = document.createElement('div'); row.className = 'taskRow';
+      var main = document.createElement('div'); main.className = 'taskMain';
+      var name = document.createElement('div'); name.className = 'taskName';
+      var idSpan = document.createElement('span'); idSpan.className = 'taskId'; idSpan.textContent = '#' + t.id + ' ';
+      name.appendChild(idSpan);
+      name.appendChild(document.createTextNode(t.name || ''));
+      main.appendChild(name);
+      var st = document.createElement('div'); st.className = 'taskStatus';
+      st.textContent = (t.statusLabel || 'Bilinmiyor') + (t.dueDate ? ' · termin ' + t.dueDate : '');
+      main.appendChild(st);
+      row.appendChild(main);
+      var prio = document.createElement('span');
+      var prioClass = (t.priority >= 1 && t.priority <= 4) ? t.priority : 1;
+      prio.className = 'prioBadge prio-' + prioClass;
+      prio.textContent = priorityLabel(t.priority);
+      row.appendChild(prio);
+      list.appendChild(row);
+    });
+  }
+
+  function resetPerfexTasks(){
+    $('perfexTasksStatus').textContent = '';
+    $('perfexTasksList').innerHTML = '';
+  }
+
   async function openMedia(messageId, disposition){
     var token = sessionStorage.getItem('operatorToken') || '';
     var headers = new Headers();
@@ -845,6 +945,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
           $('chatAvatar').textContent = initials(conv.displayName || conv.phone);
           $('chatSub').innerHTML = '<span class="statusDot"></span> ' + (conv.phone || conv.chatId);
           try { await api('/api/mark-read', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: conv.chatId }) }); } catch(e){}
+          resetPerfexTasks();
           loadMessages(true);
           loadConversationSettings();
           loadConversations();
@@ -1224,6 +1325,8 @@ body{margin:0;background:var(--bg);color:var(--text)}
     // convCustomer.onchange ile tutarlı: liste/detay panelinin atanan proje rozetini tazele.
     await loadMessages(false);
   };
+
+  $('loadPerfexTasks').onclick = loadPerfexTasks;
 
   $('mediaOpenBtn').onclick = function(){ closeMediaMenu(); if (window.__mediaMenuId) openMedia(window.__mediaMenuId, 'inline'); };
   $('mediaDownloadBtn').onclick = function(){ closeMediaMenu(); if (window.__mediaMenuId) openMedia(window.__mediaMenuId, 'attachment'); };

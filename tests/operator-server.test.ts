@@ -405,6 +405,72 @@ describe('operator HTTP API', () => {
     }
   });
 
+  it('serves Perfex tasks for a chat via /api/perfex-tasks', async () => {
+    const store = fakeStore();
+    const calls: string[] = [];
+    const server = createOperatorHttpServer({
+      tenantId: 'esmark-test',
+      store,
+      whitelistPhones: [],
+      authToken: TEST_TOKEN,
+      sendWhatsAppMessage: async () => 'unused',
+      getPerfexTasks: async (chatId: string) => {
+        calls.push(chatId);
+        return {
+          tasks: [
+            { id: 91, name: 'Reklam metni revize', priority: 3, status: 2, statusLabel: 'Devam Ediyor' },
+            { id: 92, name: 'Logo onayı', priority: 1, status: 1, statusLabel: 'Başlamadı', dueDate: '2026-06-10' }
+          ],
+          projects: [{ id: 40, name: 'Voyelle Sosyal', status: 2 }],
+          error: null
+        };
+      }
+    });
+
+    server.listen(0);
+    await once(server, 'listening');
+    try {
+      const chatId = '120363000000000000@g.us';
+      const response = await authedFetch(url(server, '/api/perfex-tasks?chatId=' + encodeURIComponent(chatId)));
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(calls).toEqual([chatId]);
+      expect(body.error).toBeNull();
+      expect(body.tasks).toHaveLength(2);
+      expect(body.tasks[0]).toMatchObject({ id: 91, name: 'Reklam metni revize', statusLabel: 'Devam Ediyor', priority: 3 });
+      expect(body.projects).toEqual([{ id: 40, name: 'Voyelle Sosyal', status: 2 }]);
+
+      const missing = await authedFetch(url(server, '/api/perfex-tasks'));
+      expect(missing.status).toBe(400);
+      const missingBody = await missing.json();
+      expect(missingBody.error).toBe('chatId_required');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('returns a disabled envelope when getPerfexTasks is not wired', async () => {
+    const store = fakeStore();
+    const server = createOperatorHttpServer({
+      tenantId: 'esmark-test',
+      store,
+      whitelistPhones: [],
+      authToken: TEST_TOKEN,
+      sendWhatsAppMessage: async () => 'unused'
+    });
+
+    server.listen(0);
+    await once(server, 'listening');
+    try {
+      const response = await authedFetch(url(server, '/api/perfex-tasks?chatId=' + encodeURIComponent('905322013401@s.whatsapp.net')));
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toMatchObject({ tasks: [], projects: [], error: 'perfex devre dışı' });
+    } finally {
+      server.close();
+    }
+  });
+
   it('throws if authToken missing or too short', () => {
     expect(() => createOperatorHttpServer({
       tenantId: 'x', store: fakeStore(), whitelistPhones: [], authToken: 'short',

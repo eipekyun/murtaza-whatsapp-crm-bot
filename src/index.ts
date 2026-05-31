@@ -8,10 +8,11 @@ import { createSqliteMessageStore } from './store/sqlite-message-store.js';
 import { createOperatorHttpServer, type GroupInfo, type MediaFile } from './http/operator-server.js';
 import { startBaileysClient, type BaileysClientOptions } from './whatsapp/baileys-client.js';
 import { createDrivePythonRunner, createMediaArchiver } from './media/media-archiver.js';
+import { createPerfexReader } from './perfex/perfex-reader.js';
 import { readCustomerCard } from './customer/customer-card-reader.js';
 import { parseGroupMappings, upsertGroupMapping } from './customer/vault-group-mapping.js';
 import { normalizePhone, normalizeWhitelist } from './phone.js';
-import type { ChatCrmMapping, MediaKind, ProjectOption } from './types.js';
+import type { ChatCrmMapping, MediaKind, PerfexQueryResult, ProjectOption } from './types.js';
 import type { WASocket } from '@whiskeysockets/baileys';
 
 async function main(): Promise<void> {
@@ -40,6 +41,13 @@ async function main(): Promise<void> {
     tenantId: config.tenantId,
     runner: driveRunner,
     logger: { info: (m) => console.log(m), error: (m) => console.error(m) }
+  });
+  // Perfex READ-ONLY okuyucu: scripts/perfex-query.py subprocess köprüsü.
+  // fetchClientStatus ASLA throw etmez; hata {tasks:[],projects:[],error} olarak döner.
+  const perfexReader = createPerfexReader({
+    python: config.perfexQueryPython,
+    scriptPath: config.perfexQueryScript,
+    opsEnvPath: config.perfexOpsEnvPath
   });
   // Restart recovery (2/2): bekleyen + başarısız tüm medyayı (firma vs inbox kararıyla) yeniden
   // kuyruğa al. enqueue arka planda seri çalışır; startup'ı bloklamaz.
@@ -172,6 +180,28 @@ async function main(): Promise<void> {
     const card = readCustomerCard(customerSlug, config.customersDir);
     if (!card) return [];
     return card.perfexProjectIds.map((p) => ({ id: p.id, name: p.name || `Proje ${p.id}` }));
+  }
+
+  // Panel 'Perfex görevleri' butonu: sohbet → grup CRM eşlemesinden perfexClientId çözer,
+  // sonra READ-ONLY perfexReader ile o firmanın açık görev/proje durumunu çeker.
+  // Firma atanmamışsa veya reader hata verirse {tasks,projects,error} döner — UI buna göre mesaj gösterir.
+  // perfexReader.fetchClientStatus zaten throw etmez; yine de defansif try-catch (eşleme okuması patlayabilir).
+  async function getPerfexTasks(chatId: string): Promise<PerfexQueryResult> {
+    try {
+      // Grup sohbeti: chat_crm_mapping mirror'ından (hızlı, @g.us için yazılır). Bireysel/atanmış
+      // sohbette mirror boş kalır; o yüzden conversation_settings.customerSlug → müşteri kartı fallback'i.
+      let perfexClientId = store.getGroupCrmMapping(config.tenantId, chatId)?.perfexClientId;
+      if (perfexClientId === undefined) {
+        const slug = (await store.getConversationSettings(config.tenantId, chatId)).customerSlug;
+        if (slug) perfexClientId = readCustomerCard(slug, config.customersDir)?.perfexClientId;
+      }
+      if (perfexClientId === undefined) {
+        return { tasks: [], projects: [], error: 'firma atanmamış' };
+      }
+      return await perfexReader.fetchClientStatus(perfexClientId);
+    } catch (error) {
+      return { tasks: [], projects: [], error: error instanceof Error ? error.message : 'perfex erişilemedi' };
+    }
   }
 
   // Operatör panelden firma/proje değiştirince chat_crm_mapping mirror'ını tazeler ve
@@ -347,6 +377,7 @@ async function main(): Promise<void> {
     listProjects: (customerSlug) => listProjects(customerSlug),
     onCustomerAssigned: (chatId, slug) => mediaArchiver.onCustomerAssigned(chatId, slug),
     onConversationCrmChanged: (chatId) => onConversationCrmChanged(chatId),
+    getPerfexTasks: (chatId) => getPerfexTasks(chatId),
     getMediaFile: (messageId) => resolveMediaFile(messageId),
     getGroupInfo: (chatId) => resolveGroupInfo(chatId),
     getAutoReplyAudience: () => autoReplyAudience,

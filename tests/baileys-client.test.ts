@@ -22,7 +22,10 @@ const config: RuntimeConfig = {
   driveUploadScript: './scripts/wa_drive_upload.py',
   driveTokenPath: '/tmp/drive_token.json',
   customersDir: './01-Musteriler',
-  groupMapPath: './02-Temel/WhatsApp-Grup-Eslemesi.md'
+  groupMapPath: './02-Temel/WhatsApp-Grup-Eslemesi.md',
+  perfexQueryPython: '/usr/bin/python3',
+  perfexQueryScript: './scripts/perfex-query.py',
+  perfexOpsEnvPath: '/home/murtaza/.config/murtaza-vps-ops.env'
 };
 
 describe('baileys inbound message mapping', () => {

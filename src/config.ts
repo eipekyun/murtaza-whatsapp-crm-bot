@@ -27,6 +27,10 @@ export interface RuntimeConfig {
   customersDir: string;
   // WhatsApp grup→firma/proje eşleme dosyası (vault). Panel write-back ve startup loader okur/yazar.
   groupMapPath: string;
+  // Perfex READ-ONLY sorgu köprüsü (scripts/perfex-query.py). PerfexReader bu üçlüyü kullanır.
+  perfexQueryPython: string;
+  perfexQueryScript: string;
+  perfexOpsEnvPath: string;
 }
 
 type Env = Record<string, string | undefined>;
@@ -57,7 +61,13 @@ export function loadConfigFromEnv(env: Env = process.env): RuntimeConfig {
     driveUploadScript: env.BOT_DRIVE_UPLOAD_SCRIPT?.trim() || resolve(process.cwd(), 'scripts', 'wa_drive_upload.py'),
     driveTokenPath: expandHome(env.BOT_DRIVE_TOKEN_PATH?.trim() || '~/.hermes/drive_token.json'),
     customersDir,
-    groupMapPath: env.BOT_GROUP_MAP_PATH?.trim() || resolve(customersDir, '..', '02-Temel', 'WhatsApp-Grup-Eslemesi.md')
+    groupMapPath: env.BOT_GROUP_MAP_PATH?.trim() || resolve(customersDir, '..', '02-Temel', 'WhatsApp-Grup-Eslemesi.md'),
+    perfexQueryPython:
+      env.BOT_PERFEX_PYTHON?.trim() ||
+      env.BOT_DRIVE_PYTHON?.trim() ||
+      `${homedir()}/.local/share/pipx/venvs/hermes-agent/bin/python3`,
+    perfexQueryScript: env.BOT_PERFEX_QUERY_SCRIPT?.trim() || resolve(process.cwd(), 'scripts', 'perfex-query.py'),
+    perfexOpsEnvPath: expandHome(env.BOT_PERFEX_OPS_ENV?.trim() || '~/.config/murtaza-vps-ops.env')
   };
 }
 
