@@ -1,6 +1,21 @@
 # SESSION_SUMMARY — murtaza-whatsapp-crm-bot
 
-Son güncelleme: 2026-05-31 (Faz 1 — grup↔müşteri/proje eşleme)
+Son güncelleme: 2026-05-31 (Faz 2 — Perfex açık görev/proje paneli; + WhatsApp Durum filtresi)
+
+## 2026-05-31 — Faz 2: Eşli Müşterinin Perfex Açık Görev/Proje Durumu Panelde (read-only)
+
+Plan Faz 2. **Subprocess mimarisi** (mevcut Drive runner kalıbı): `scripts/perfex-query.py` (SSH+MySQL SELECT, rel_type='client' status<5 + tblprojects, clientId int-cast guard, READ-ONLY) → `src/perfex/perfex-reader.ts` (PerfexReader, execFile→JSON, throw etmez) → `GET /api/perfex-tasks?chatId=` → panel sağ panelde **on-demand** "Perfex Görevler" bloğu (SSH latency nedeniyle butona basınca, otomatik değil).
+
+- chatId → perfexClientId çözümü: grup için `chat_crm_mapping` mirror (Faz 1), bireysel/atanmış için `conversation_settings.customerSlug` → müşteri kartı fallback (review fix).
+- Perfex'e BAĞLANIR ama **READ-ONLY** (sadece SELECT; INSERT/UPDATE/DELETE yok). Credential `~/.config/murtaza-vps-ops.env` (SSH key + MySQL JSON), script kendi yükler — bot process'inde credential yok.
+- **Kalite:** 3-lens adversarial review (16 ajan) → 6 bulgu (LOW/MEDIUM, 0 CRITICAL/HIGH) fix: MySQL hata mesajı sızıntısı (stderr'e log + generic), Python timeout 25→18s (TS 20s altı), bireysel sohbet kart fallback, tip union sadeleştirme, .env belge. tsc temiz, **117 test** (101→117).
+- **Canlı doğrulama:** `perfex-query.py 24` → 5 görev + 1 proje. Restart sonrası `/api/perfex-tasks` (atolye-bambini grubu) → 2 proje (Hosting, Dijital Pazarlama) tüm zincir çalıştı; atanmamış sohbet → "firma atanmamış". Commit `8a77cee`. +1 QR'sız resume.
+
+**Sıradaki — Faz 3:** Hermes LLM ile grup mesajlarından özet/aday görev çıkarımı (Codex cascade) → onaylı Perfex write (Faz 4). chat_crm_mapping + Perfex read köprüsü hazır temel.
+
+## 2026-05-31 — WhatsApp Durum (status@broadcast) filtresi
+
+Story paylaşımları normal sohbet listesinden çıkarıldı: `messages.upsert` handler'ında `status@broadcast` drop (kaydedilmez/arşivlenmez/router'a girmez) + `listConversations` defansif filtresi. Commit `902824c`, canlıda aktif.
 
 ## 2026-05-31 — Faz 1: Grup ↔ Müşteri/Proje Eşleme (orkestratör + paralel ajan)
 
