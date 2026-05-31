@@ -18,7 +18,9 @@ Plan: `02-Temel/WhatsApp-Grup-CRM-Plani.md` Faz 1. **Saf Faz 1** (Perfex'e bağl
 
 **Kalite:** 4 lens adversarial review (güvenlik/TS/mantık/regresyon, 21 ajan) → 11 onaylı bulgu (LOW/MEDIUM, CRITICAL/HIGH yok) → hepsi düzeltildi: 0-sentinel→undefined normalize, startup stale mirror temizliği (+deleteGroupCrmMapping), 1:1 sohbet chat_crm_mapping'e yazılmıyor (grup-only), writeAtomic tmp cleanup, projectName comment-safe, vault doc chat= hizalama, convProject loadMessages, startup log. **tsc temiz, 101 test yeşil** (57→101).
 
-**Bekleyen:** Canlı bot restart + smoke (operatör onayı bekliyor — restart auth resume eder, QR gerekmez). Faz 2 (eşli müşterinin Perfex açık görev/proje durumunu panelde canlı göster — SSH+MySQL read) sonraki adım.
+**Restart + smoke (2026-05-31 ~18:35 UTC — YAPILDI):** Bot SIGTERM→SIGKILL ile durduruldu, setsid ile yeni kodla başlatıldı. +1 **QR'sız resume** etti (`wa-status: {state:open, me:15613764604}`, `handled 0 offline messages`), yeni kod aktif (`Vault grup eşleme yüklendi: 0 entry`), `chat_crm_mapping` tablosu oluştu, YENİ `/api/projects?customerSlug=atolye-bambini` canlı doğrulandı → `[{9,Hosting Hizmeti},{21,Dijital Pazarlama}]`. Yeni process logunda hata yok. ~18 sn downtime, mesaj kaçmadı. Panel `100.88.170.32:8787` (Tailscale).
+
+**Sıradaki — Faz 2:** eşli müşterinin Perfex açık görev/proje durumunu panelde canlı göster (SSH+MySQL read-only). `chat_crm_mapping` mirror artık hazır; Hermes/panel buradan client/project_id okur. Perfex mimari kararı (A=MySQL vs B=REST) Faz 4 write için netleşmeli.
 
 ## 2026-05-30 — Gelen medya Drive arşivleme + atanmamış için MURTAZA inbox fallback
 
