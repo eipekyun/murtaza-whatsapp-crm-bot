@@ -8,8 +8,10 @@ import { createSqliteMessageStore } from './store/sqlite-message-store.js';
 import { createOperatorHttpServer, type GroupInfo, type MediaFile } from './http/operator-server.js';
 import { startBaileysClient, type BaileysClientOptions } from './whatsapp/baileys-client.js';
 import { createDrivePythonRunner, createMediaArchiver } from './media/media-archiver.js';
+import { readCustomerCard } from './customer/customer-card-reader.js';
+import { parseGroupMappings, upsertGroupMapping } from './customer/vault-group-mapping.js';
 import { normalizePhone, normalizeWhitelist } from './phone.js';
-import type { MediaKind } from './types.js';
+import type { ChatCrmMapping, MediaKind, ProjectOption } from './types.js';
 import type { WASocket } from '@whiskeysockets/baileys';
 
 async function main(): Promise<void> {
@@ -42,6 +44,8 @@ async function main(): Promise<void> {
   // Restart recovery (2/2): bekleyen + başarısız tüm medyayı (firma vs inbox kararıyla) yeniden
   // kuyruğa al. enqueue arka planda seri çalışır; startup'ı bloklamaz.
   if (config.archiveMedia) await mediaArchiver.requeuePending();
+  // Vault grup eşlemeleri (authoritative) ile chat_crm_mapping mirror'ını startup'ta tazele.
+  loadGroupMappingsFromVault();
   const router = createRouter({
     tenantId: config.tenantId,
     whitelistPhones: config.whitelistPhones,
@@ -162,6 +166,110 @@ async function main(): Promise<void> {
     return out;
   }
 
+  // Seçili firmanın Perfex projeleri (kart 'Aktif Projeler' bölümünden). Çoklu projeli
+  // müşteride operatör panelden seçer. Kart yoksa veya proje yoksa boş dizi.
+  function listProjects(customerSlug: string): ProjectOption[] {
+    const card = readCustomerCard(customerSlug, config.customersDir);
+    if (!card) return [];
+    return card.perfexProjectIds.map((p) => ({ id: p.id, name: p.name || `Proje ${p.id}` }));
+  }
+
+  // Operatör panelden firma/proje değiştirince chat_crm_mapping mirror'ını tazeler ve
+  // vault eşleme dosyasını günceller. Slug conversation_settings'ten; perfexClientId/projectName/
+  // repoPath karttan zenginleştirilir. Tek projeli kartta seçim yoksa o proje otomatik alınır.
+  // Her yan etki (store yazımı, vault yazımı) AYRI try-catch; biri patlarsa diğeri çalışsın.
+  async function onConversationCrmChanged(chatId: string): Promise<void> {
+    // chat_crm_mapping + vault eşleme YALNIZ grup sohbetleri için tutulur (tablo/dosya semantiği grup).
+    // 1:1 sohbet CRM bilgisi conversation_settings'te yaşar; bu callback'ten önce panel onu yazdı.
+    if (!chatId.endsWith('@g.us')) return;
+
+    const settings = await store.getConversationSettings(config.tenantId, chatId);
+    const slug = settings.customerSlug;
+    if (!slug) return;
+
+    const card = readCustomerCard(slug, config.customersDir);
+    // perfexProjectId operatörce seçilmemişse (undefined) ve kart tek projeliyse onu varsay.
+    // Store 0'ı undefined'a normalize ettiğinden burada yalnız undefined kontrolü yeter.
+    let perfexProjectId = settings.perfexProjectId;
+    if (perfexProjectId === undefined && card && card.perfexProjectIds.length === 1) {
+      perfexProjectId = card.perfexProjectIds[0]?.id;
+    }
+    const projectName = card?.perfexProjectIds.find((p) => p.id === perfexProjectId)?.name;
+
+    const mapping: ChatCrmMapping = {
+      tenantId: config.tenantId,
+      chatId,
+      customerSlug: slug,
+      ...(card?.perfexClientId !== undefined ? { perfexClientId: card.perfexClientId } : {}),
+      ...(perfexProjectId !== undefined ? { perfexProjectId } : {}),
+      ...(projectName ? { projectName } : {}),
+      ...(card?.repoPath ? { repoPath: card.repoPath } : {}),
+      updatedAt: new Date().toISOString()
+    };
+
+    // Her yan etki AYRI try-catch; biri patlarsa diğeri çalışsın.
+    try {
+      store.setGroupCrmMapping(mapping);
+    } catch (error) {
+      console.error('chat_crm_mapping mirror tazeleme hatası:', error instanceof Error ? error.message : error);
+    }
+
+    try {
+      upsertGroupMapping(config.groupMapPath, {
+        chatId,
+        slug,
+        ...(card?.perfexClientId !== undefined ? { perfexClientId: card.perfexClientId } : {}),
+        ...(perfexProjectId !== undefined ? { perfexProjectId } : {}),
+        ...(projectName ? { projectName } : {})
+      });
+    } catch (error) {
+      console.error('Vault grup eşleme yazımı hatası:', error instanceof Error ? error.message : error);
+    }
+  }
+
+  // Startup loader: vault eşleme dosyası authoritative. Her entry'yi kartla zenginleştirip
+  // chat_crm_mapping mirror'ını tazeler. Hata botu durdurmaz (log + devam).
+  function loadGroupMappingsFromVault(): void {
+    try {
+      const entries = parseGroupMappings(config.groupMapPath);
+      const vaultChatIds = new Set(entries.map((e) => e.chatId));
+      for (const entry of entries) {
+        const card = readCustomerCard(entry.slug, config.customersDir);
+        const projectName = entry.projectName
+          ?? card?.perfexProjectIds.find((p) => p.id === entry.perfexProjectId)?.name;
+        const mapping: ChatCrmMapping = {
+          tenantId: config.tenantId,
+          chatId: entry.chatId,
+          customerSlug: entry.slug,
+          ...(entry.perfexClientId !== undefined ? { perfexClientId: entry.perfexClientId }
+            : card?.perfexClientId !== undefined ? { perfexClientId: card.perfexClientId } : {}),
+          ...(entry.perfexProjectId !== undefined ? { perfexProjectId: entry.perfexProjectId } : {}),
+          ...(projectName ? { projectName } : {}),
+          ...(card?.repoPath ? { repoPath: card.repoPath } : {}),
+          updatedAt: new Date().toISOString()
+        };
+        try {
+          store.setGroupCrmMapping(mapping);
+        } catch (error) {
+          console.error(`Grup eşleme mirror yazımı hatası (chat=${entry.chatId}):`, error instanceof Error ? error.message : error);
+        }
+      }
+      // Vault authoritative: vault'tan silinmiş grup eşlemelerini SQLite mirror'dan da temizle (stale önle).
+      try {
+        for (const existing of store.listGroupCrmMappings(config.tenantId)) {
+          if (existing.chatId.endsWith('@g.us') && !vaultChatIds.has(existing.chatId)) {
+            store.deleteGroupCrmMapping(config.tenantId, existing.chatId);
+          }
+        }
+      } catch (error) {
+        console.error('Stale grup eşleme temizleme hatası:', error instanceof Error ? error.message : error);
+      }
+      console.log('Vault grup eşleme yüklendi: %d entry', entries.length);
+    } catch (error) {
+      console.error('Vault grup eşleme yükleme hatası:', error instanceof Error ? error.message : error);
+    }
+  }
+
   // WhatsApp'tan gelen dosya adı (mediaName) güvenilmez; path traversal'ı önlemek için
   // basename + karakter filtresiyle güvenli bir tek-segment dosya adına indir.
   function safeMediaName(name?: string): string {
@@ -236,7 +344,9 @@ async function main(): Promise<void> {
     authToken: config.operatorToken,
     noAuth: config.operatorNoAuth,
     listCustomers,
+    listProjects: (customerSlug) => listProjects(customerSlug),
     onCustomerAssigned: (chatId, slug) => mediaArchiver.onCustomerAssigned(chatId, slug),
+    onConversationCrmChanged: (chatId) => onConversationCrmChanged(chatId),
     getMediaFile: (messageId) => resolveMediaFile(messageId),
     getGroupInfo: (chatId) => resolveGroupInfo(chatId),
     getAutoReplyAudience: () => autoReplyAudience,

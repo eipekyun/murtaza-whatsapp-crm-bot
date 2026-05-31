@@ -1,6 +1,24 @@
 # SESSION_SUMMARY — murtaza-whatsapp-crm-bot
 
-Son güncelleme: 2026-05-30 (medya arşivleme + inbox fallback + grup ayrımı/detay paneli)
+Son güncelleme: 2026-05-31 (Faz 1 — grup↔müşteri/proje eşleme)
+
+## 2026-05-31 — Faz 1: Grup ↔ Müşteri/Proje Eşleme (orkestratör + paralel ajan)
+
+Plan: `02-Temel/WhatsApp-Grup-CRM-Plani.md` Faz 1. **Saf Faz 1** (Perfex'e bağlanmaz, vault kartından dosya okur) + **vault authoritative + write-back** (Ersin kararı). Bot CANLI ama yeni kod **henüz restart edilmedi** — değişiklikler working tree'de, commit'li, restart bekliyor.
+
+**Mimari:** Authoritative = vault `02-Temel/WhatsApp-Grup-Eslemesi.md` (satır sonu `<!-- wa-map chat=… slug=… client=… project=… -->`). Bot SQLite `chat_crm_mapping` = mirror. conversation_settings (app_state JSON) = UI/medya state (`customerSlug` + yeni `perfexProjectId`). Panel atama → `onConversationCrmChanged` → card-reader çöz → `setGroupCrmMapping` + vault `upsertGroupMapping` (git YOK, 10dk auto-sync cron commitler). Startup'ta vault okunur, mirror tazelenir (stale temizliği dahil).
+
+**Üretim (orkestratör = Claude Code ana döngü, dalga dalga workflow):**
+- YENİ `src/customer/slug.ts` (merkezi normalizeSlug — store + card-reader + media-archiver buna bağlandı), `customer-card-reader.ts` (kart parse: Perfex userid→client, çoklu project ID, lead id, repo path; graceful), `vault-group-mapping.ts` (eşleme dosyası parse + atomik upsert, `@g.us` guard, comment-safe).
+- `types.ts`: `ConversationSettings.perfexProjectId` + `ChatCrmMapping`/`CustomerCardInfo`/`ProjectOption`.
+- `sqlite-message-store.ts`: `chat_crm_mapping` tablosu + `get/set/list/deleteGroupCrmMapping` (senkron) + perfexProjectId round-trip (0 = temizle → undefined normalize).
+- `operator-server.ts`: `listProjects` callback + `GET /api/projects` + `onConversationCrmChanged` + `convProject` select + detayda firma/proje rozeti.
+- `index.ts`: listProjects/onConversationCrmChanged/loadGroupMappingsFromVault wiring (grup-only, hata-izole, startup stale cleanup + log).
+- Vault: `WhatsApp-Grup-Eslemesi.md` iskelet; 16 aktif müşteri kartı + şablona `## Bilgiler` altında `WhatsApp Grup JID` alanı.
+
+**Kalite:** 4 lens adversarial review (güvenlik/TS/mantık/regresyon, 21 ajan) → 11 onaylı bulgu (LOW/MEDIUM, CRITICAL/HIGH yok) → hepsi düzeltildi: 0-sentinel→undefined normalize, startup stale mirror temizliği (+deleteGroupCrmMapping), 1:1 sohbet chat_crm_mapping'e yazılmıyor (grup-only), writeAtomic tmp cleanup, projectName comment-safe, vault doc chat= hizalama, convProject loadMessages, startup log. **tsc temiz, 101 test yeşil** (57→101).
+
+**Bekleyen:** Canlı bot restart + smoke (operatör onayı bekliyor — restart auth resume eder, QR gerekmez). Faz 2 (eşli müşterinin Perfex açık görev/proje durumunu panelde canlı göster — SSH+MySQL read) sonraki adım.
 
 ## 2026-05-30 — Gelen medya Drive arşivleme + atanmamış için MURTAZA inbox fallback
 

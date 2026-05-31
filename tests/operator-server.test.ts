@@ -2,7 +2,7 @@ import { once } from 'node:events';
 import { describe, expect, it } from 'vitest';
 import { createOperatorHttpServer } from '../src/http/operator-server.js';
 import type { MessageStore } from '../src/store/sqlite-message-store.js';
-import type { OutboundMessage } from '../src/types.js';
+import type { ChatCrmMapping, OutboundMessage } from '../src/types.js';
 
 const TEST_TOKEN = '0123456789abcdef0123456789abcdef';
 function authedFetch(input: string, init: RequestInit = {}): Promise<Response> {
@@ -23,7 +23,8 @@ interface FakeStoreOptions {
 
 function fakeStore(saved: OutboundMessage[] = [], opts: FakeStoreOptions = {}): MessageStore {
   const state = new Map<string, string>();
-  const settings = new Map<string, { botEnabled: boolean; tags: string[]; note?: string; readReceipt: 'on_reply' | 'on_open' | 'never' }>();
+  const crmMappings = new Map<string, ChatCrmMapping>();
+  const settings = new Map<string, { botEnabled: boolean; tags: string[]; note?: string; readReceipt: 'on_reply' | 'on_open' | 'never'; customerSlug?: string; perfexProjectId?: number }>();
   return {
     saveInbound: async () => {},
     saveOutbound: async (message: OutboundMessage) => { saved.push(message); },
@@ -38,7 +39,18 @@ function fakeStore(saved: OutboundMessage[] = [], opts: FakeStoreOptions = {}): 
     getConversationSettings: async (_tenantId: string, chatId: string) => settings.get(chatId) ?? { botEnabled: true, tags: [], readReceipt: 'on_reply' },
     setConversationSettings: async (_tenantId: string, chatId: string, patch) => {
       const base = settings.get(chatId) ?? { botEnabled: true, tags: [] as string[], readReceipt: 'on_reply' as const };
-      const next = { ...base, ...patch, readReceipt: patch.readReceipt ?? base.readReceipt };
+      // Gerçek store: yalnız tanımlı alan yazılır, undefined alan mevcut değeri korur.
+      const next = {
+        botEnabled: typeof patch.botEnabled === 'boolean' ? patch.botEnabled : base.botEnabled,
+        tags: patch.tags ?? base.tags,
+        note: patch.note ?? base.note,
+        readReceipt: patch.readReceipt ?? base.readReceipt,
+        customerSlug: patch.customerSlug ?? base.customerSlug,
+        // perfexProjectId: yalnız finite number ise yaz, değilse mevcut değeri koru.
+        perfexProjectId: typeof patch.perfexProjectId === 'number' && Number.isFinite(patch.perfexProjectId)
+          ? patch.perfexProjectId
+          : base.perfexProjectId
+      };
       settings.set(chatId, next);
       return next;
     },
@@ -54,6 +66,10 @@ function fakeStore(saved: OutboundMessage[] = [], opts: FakeStoreOptions = {}): 
     resetStaleUploading: async () => {},
     getAppState: async (key: string) => state.get(key),
     setAppState: async (key: string, value: string) => { state.set(key, value); },
+    getGroupCrmMapping: (_tenantId: string, chatId: string) => crmMappings.get(chatId),
+    setGroupCrmMapping: (mapping: ChatCrmMapping) => { crmMappings.set(mapping.chatId, mapping); },
+    listGroupCrmMappings: () => [...crmMappings.values()],
+    deleteGroupCrmMapping: (_tenantId: string, chatId: string) => { crmMappings.delete(chatId); },
     close: () => {}
   };
 }
@@ -281,6 +297,109 @@ describe('operator HTTP API', () => {
 
       const htmlOk = await fetch(url(server, '/'));
       expect(htmlOk.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('lists Perfex projects for a customer slug via /api/projects', async () => {
+    const store = fakeStore();
+    const calls: string[] = [];
+    const server = createOperatorHttpServer({
+      tenantId: 'esmark-test',
+      store,
+      whitelistPhones: [],
+      authToken: TEST_TOKEN,
+      sendWhatsAppMessage: async () => 'unused',
+      listProjects: (slug: string) => {
+        calls.push(slug);
+        return slug === 'ersin-ic-operasyon'
+          ? [{ id: 39, name: 'Ops A' }, { id: 40, name: 'Ops B' }]
+          : [];
+      }
+    });
+
+    server.listen(0);
+    await once(server, 'listening');
+    try {
+      const response = await authedFetch(url(server, '/api/projects?customerSlug=ersin-ic-operasyon'));
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(calls).toEqual(['ersin-ic-operasyon']);
+      expect(body.projects).toEqual([{ id: 39, name: 'Ops A' }, { id: 40, name: 'Ops B' }]);
+
+      const empty = await authedFetch(url(server, '/api/projects'));
+      expect(empty.status).toBe(200);
+      const emptyBody = await empty.json();
+      expect(emptyBody.projects).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('round-trips perfexProjectId through conversation settings', async () => {
+    const store = fakeStore();
+    const server = createOperatorHttpServer({
+      tenantId: 'esmark-test',
+      store,
+      whitelistPhones: [],
+      authToken: TEST_TOKEN,
+      sendWhatsAppMessage: async () => 'unused'
+    });
+
+    server.listen(0);
+    await once(server, 'listening');
+    try {
+      const setResponse = await authedFetch(url(server, '/api/conversation-settings'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ chatId: '120363000000000000@g.us', customerSlug: 'ersin-ic-operasyon', perfexProjectId: 40 })
+      });
+      expect(setResponse.status).toBe(200);
+      const setBody = await setResponse.json();
+      expect(setBody.settings).toMatchObject({ customerSlug: 'ersin-ic-operasyon', perfexProjectId: 40 });
+
+      const getResponse = await authedFetch(url(server, '/api/conversation-settings?chatId=' + encodeURIComponent('120363000000000000@g.us')));
+      const getBody = await getResponse.json();
+      expect(getBody.settings.perfexProjectId).toBe(40);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('fires onConversationCrmChanged when slug or project changes, not on no-op', async () => {
+    const store = fakeStore();
+    const changed: string[] = [];
+    const assigned: Array<{ chatId: string; slug: string }> = [];
+    const server = createOperatorHttpServer({
+      tenantId: 'esmark-test',
+      store,
+      whitelistPhones: [],
+      authToken: TEST_TOKEN,
+      sendWhatsAppMessage: async () => 'unused',
+      onCustomerAssigned: (chatId: string, slug: string) => { assigned.push({ chatId, slug }); },
+      onConversationCrmChanged: (chatId: string) => { changed.push(chatId); }
+    });
+
+    server.listen(0);
+    await once(server, 'listening');
+    const chatId = '120363111111111111@g.us';
+    const post = (payload: Record<string, unknown>): Promise<Response> =>
+      authedFetch(url(server, '/api/conversation-settings'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ chatId, ...payload })
+      });
+    try {
+      // 1) slug atanır → hem onCustomerAssigned hem onConversationCrmChanged
+      await post({ customerSlug: 'voyelle-tour' });
+      // 2) proje atanır → yalnız onConversationCrmChanged
+      await post({ perfexProjectId: 36 });
+      // 3) sadece not güncellenir (CRM değişmez) → CRM callback tetiklenmez
+      await post({ note: 'sıcak lead' });
+
+      expect(assigned).toEqual([{ chatId, slug: 'voyelle-tour' }]);
+      expect(changed).toEqual([chatId, chatId]);
     } finally {
       server.close();
     }

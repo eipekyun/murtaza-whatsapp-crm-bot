@@ -1,8 +1,9 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
-import type { ConversationSettings, ConversationSummary, InboundMessage, MediaUploadStatus, OutboundMessage, ReadReceiptMode, StoredMessage } from '../types.js';
+import type { ChatCrmMapping, ConversationSettings, ConversationSummary, InboundMessage, MediaUploadStatus, OutboundMessage, ReadReceiptMode, StoredMessage } from '../types.js';
 import { normalizePhone, normalizeWhitelist } from '../phone.js';
+import { normalizeSlug } from '../customer/slug.js';
 
 interface MessageRow {
   tenant_id: string;
@@ -58,6 +59,17 @@ interface ConversationRow {
   unread_count: number;
 }
 
+interface ChatCrmMappingRow {
+  tenant_id: string;
+  chat_id: string;
+  customer_slug: string | null;
+  perfex_client_id: number | null;
+  perfex_project_id: number | null;
+  project_name: string | null;
+  repo_path: string | null;
+  updated_at: string;
+}
+
 export interface MessageStore {
   saveInbound(message: InboundMessage): Promise<void>;
   saveOutbound(message: OutboundMessage): Promise<void>;
@@ -83,6 +95,11 @@ export interface MessageStore {
   // Grup başlığı (Drive klasör adı için): contact_names'te kayıtlı grup adı.
   getGroupSubject(tenantId: string, chatId: string): Promise<string | undefined>;
   resetStaleUploading(tenantId: string): Promise<void>;
+  // Grup → Perfex müşteri/proje eşlemesi (chat_crm_mapping tablosu).
+  getGroupCrmMapping(tenantId: string, chatId: string): ChatCrmMapping | undefined;
+  setGroupCrmMapping(mapping: ChatCrmMapping): void;
+  listGroupCrmMappings(tenantId: string): ChatCrmMapping[];
+  deleteGroupCrmMapping(tenantId: string, chatId: string): void;
   getAppState(key: string): Promise<string | undefined>;
   setAppState(key: string, value: string): Promise<void>;
   close(): void;
@@ -133,6 +150,18 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
       source TEXT,
       updated_at TEXT NOT NULL,
       PRIMARY KEY (tenant_id, jid)
+    );
+
+    CREATE TABLE IF NOT EXISTS chat_crm_mapping (
+      tenant_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      customer_slug TEXT,
+      perfex_client_id INTEGER,
+      perfex_project_id INTEGER,
+      project_name TEXT,
+      repo_path TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (tenant_id, chat_id)
     );
   `);
   ensureColumn(db, 'messages', 'origin', 'TEXT');
@@ -379,6 +408,42 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
     WHERE tenant_id = ? AND media_upload_status = 'uploading'
   `);
 
+  const getCrmMappingStmt = db.prepare<[string, string], ChatCrmMappingRow>(`
+    SELECT tenant_id, chat_id, customer_slug, perfex_client_id, perfex_project_id,
+           project_name, repo_path, updated_at
+    FROM chat_crm_mapping
+    WHERE tenant_id = ? AND chat_id = ?
+    LIMIT 1
+  `);
+  const getCrmMappingReader = getCrmMappingStmt as unknown as { get: (t: string, c: string) => ChatCrmMappingRow | undefined };
+
+  const upsertCrmMappingStmt = db.prepare<[string, string, string | null, number | null, number | null, string | null, string | null, string]>(`
+    INSERT INTO chat_crm_mapping (
+      tenant_id, chat_id, customer_slug, perfex_client_id, perfex_project_id,
+      project_name, repo_path, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(tenant_id, chat_id) DO UPDATE SET
+      customer_slug = excluded.customer_slug,
+      perfex_client_id = excluded.perfex_client_id,
+      perfex_project_id = excluded.perfex_project_id,
+      project_name = excluded.project_name,
+      repo_path = excluded.repo_path,
+      updated_at = excluded.updated_at
+  `);
+
+  const listCrmMappingsStmt = db.prepare<[string], ChatCrmMappingRow>(`
+    SELECT tenant_id, chat_id, customer_slug, perfex_client_id, perfex_project_id,
+           project_name, repo_path, updated_at
+    FROM chat_crm_mapping
+    WHERE tenant_id = ?
+    ORDER BY updated_at DESC
+  `);
+
+  const deleteCrmMappingStmt = db.prepare<[string, string]>(`
+    DELETE FROM chat_crm_mapping
+    WHERE tenant_id = ? AND chat_id = ?
+  `);
+
   return {
     async saveInbound(message: InboundMessage): Promise<void> {
       insert.run(
@@ -499,7 +564,12 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
         tags: Array.isArray(patch.tags) ? patch.tags.map(String).map((tag) => tag.trim()).filter(Boolean).slice(0, 12) : current.tags,
         note: typeof patch.note === 'string' ? patch.note.trim().slice(0, 1000) : current.note,
         readReceipt: patch.readReceipt ?? current.readReceipt,
-        customerSlug: typeof patch.customerSlug === 'string' ? normalizeSlug(patch.customerSlug) : current.customerSlug
+        customerSlug: typeof patch.customerSlug === 'string' ? normalizeSlug(patch.customerSlug) : current.customerSlug,
+        // perfexProjectId: pozitif sayı = ata, 0/negatif = temizle (undefined → JSON'dan düşer), alan yok = koru.
+        // Perfex proje ID'leri her zaman >0; 0 panelden gelen "proje seçimini temizle" sinyalidir.
+        perfexProjectId: typeof patch.perfexProjectId === 'number' && Number.isFinite(patch.perfexProjectId)
+          ? (patch.perfexProjectId > 0 ? patch.perfexProjectId : undefined)
+          : current.perfexProjectId
       };
       setState.run(conversationSettingsKey(tenantId, chatId), JSON.stringify(next), new Date().toISOString());
       return next;
@@ -567,6 +637,33 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
       resetStaleUploadingStmt.run(tenantId);
     },
 
+    getGroupCrmMapping(tenantId: string, chatId: string): ChatCrmMapping | undefined {
+      const row = getCrmMappingReader.get(tenantId, chatId);
+      if (!row) return undefined;
+      return rowToChatCrmMapping(row);
+    },
+
+    setGroupCrmMapping(mapping: ChatCrmMapping): void {
+      upsertCrmMappingStmt.run(
+        mapping.tenantId,
+        mapping.chatId,
+        mapping.customerSlug ? normalizeSlug(mapping.customerSlug) : null,
+        mapping.perfexClientId ?? null,
+        mapping.perfexProjectId ?? null,
+        mapping.projectName ?? null,
+        mapping.repoPath ?? null,
+        mapping.updatedAt
+      );
+    },
+
+    listGroupCrmMappings(tenantId: string): ChatCrmMapping[] {
+      return listCrmMappingsStmt.all(tenantId).map(rowToChatCrmMapping);
+    },
+
+    deleteGroupCrmMapping(tenantId: string, chatId: string): void {
+      deleteCrmMappingStmt.run(tenantId, chatId);
+    },
+
     async getAppState(key: string): Promise<string | undefined> {
       return (getState as unknown as { get: (key: string) => { value: string } | undefined }).get(key)?.value;
     },
@@ -601,15 +698,26 @@ function readConversationSettings(getState: { get: (key: string) => { value: str
       tags: Array.isArray(parsed.tags) ? parsed.tags.map(String).filter(Boolean) : [],
       note: typeof parsed.note === 'string' && parsed.note ? parsed.note : undefined,
       readReceipt: parsed.readReceipt === 'on_open' || parsed.readReceipt === 'never' ? parsed.readReceipt : 'on_reply',
-      customerSlug: slug || undefined
+      customerSlug: slug || undefined,
+      // Yalnız pozitif değer geçerli proje; 0/negatif (eski sentinel kayıtları dahil) = atanmamış.
+      perfexProjectId: typeof parsed.perfexProjectId === 'number' && Number.isFinite(parsed.perfexProjectId) && parsed.perfexProjectId > 0 ? parsed.perfexProjectId : undefined
     };
   } catch {
     return fallback;
   }
 }
 
-function normalizeSlug(value: string): string {
-  return value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+function rowToChatCrmMapping(row: ChatCrmMappingRow): ChatCrmMapping {
+  return {
+    tenantId: row.tenant_id,
+    chatId: row.chat_id,
+    customerSlug: row.customer_slug ?? undefined,
+    perfexClientId: row.perfex_client_id ?? undefined,
+    perfexProjectId: row.perfex_project_id ?? undefined,
+    projectName: row.project_name ?? undefined,
+    repoPath: row.repo_path ?? undefined,
+    updatedAt: row.updated_at
+  };
 }
 
 function normalizeUploadStatus(value: string | null): MediaUploadStatus | undefined {

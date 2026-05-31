@@ -25,6 +25,8 @@ export interface RuntimeConfig {
   driveUploadScript: string;
   driveTokenPath: string;
   customersDir: string;
+  // WhatsApp grup→firma/proje eşleme dosyası (vault). Panel write-back ve startup loader okur/yazar.
+  groupMapPath: string;
 }
 
 type Env = Record<string, string | undefined>;
@@ -34,6 +36,7 @@ const ALL_MEDIA_KINDS: MediaKind[] = ['image', 'video', 'document', 'audio', 'st
 export function loadConfigFromEnv(env: Env = process.env): RuntimeConfig {
   const dbPath = env.BOT_DB_PATH?.trim() || './data/poc.sqlite';
   const dataDir = dirname(resolve(dbPath));
+  const customersDir = env.BOT_CUSTOMERS_DIR?.trim() || resolve(process.cwd(), '..', '..', '01-Musteriler');
   return {
     tenantId: env.BOT_TENANT_ID?.trim() || 'esmark-test',
     displayName: env.BOT_DISPLAY_NAME?.trim() || 'ESMARK Asistan',
@@ -53,7 +56,8 @@ export function loadConfigFromEnv(env: Env = process.env): RuntimeConfig {
     drivePython: env.BOT_DRIVE_PYTHON?.trim() || `${homedir()}/.local/share/pipx/venvs/hermes-agent/bin/python3`,
     driveUploadScript: env.BOT_DRIVE_UPLOAD_SCRIPT?.trim() || resolve(process.cwd(), 'scripts', 'wa_drive_upload.py'),
     driveTokenPath: expandHome(env.BOT_DRIVE_TOKEN_PATH?.trim() || '~/.hermes/drive_token.json'),
-    customersDir: env.BOT_CUSTOMERS_DIR?.trim() || resolve(process.cwd(), '..', '..', '01-Musteriler')
+    customersDir,
+    groupMapPath: env.BOT_GROUP_MAP_PATH?.trim() || resolve(customersDir, '..', '02-Temel', 'WhatsApp-Grup-Eslemesi.md')
   };
 }
 

@@ -21,7 +21,8 @@ const config: RuntimeConfig = {
   drivePython: '/usr/bin/python3',
   driveUploadScript: './scripts/wa_drive_upload.py',
   driveTokenPath: '/tmp/drive_token.json',
-  customersDir: './01-Musteriler'
+  customersDir: './01-Musteriler',
+  groupMapPath: './02-Temel/WhatsApp-Grup-Eslemesi.md'
 };
 
 describe('baileys inbound message mapping', () => {

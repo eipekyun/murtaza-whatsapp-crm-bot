@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { createReadStream, readFileSync, rmSync } from 'node:fs';
 import type { MessageStore } from '../store/sqlite-message-store.js';
+import type { ProjectOption } from '../types.js';
 import { normalizePhone } from '../phone.js';
 
 export interface WhatsAppSendPayload {
@@ -55,7 +56,11 @@ export interface OperatorServerOptions {
   sendWhatsAppMessage: (payload: WhatsAppSendPayload) => Promise<string | undefined>;
   // Medya arşivleme + firma atama
   listCustomers?: () => Promise<CustomerOption[]> | CustomerOption[];
+  // Seçili firmanın Perfex projeleri — çoklu projeli müşteride operatöre seçtirilir
+  listProjects?: (customerSlug: string) => Promise<ProjectOption[]> | ProjectOption[];
   onCustomerAssigned?: (chatId: string, slug: string) => Promise<void> | void;
+  // Slug VEYA perfexProjectId değişince çağrılır (CRM eşleme tazeleme için); onCustomerAssigned ayrı tutulur
+  onConversationCrmChanged?: (chatId: string) => Promise<void> | void;
   getMediaFile?: (messageId: string) => Promise<MediaFile | undefined>;
   getGroupInfo?: (chatId: string) => Promise<GroupInfo | undefined>;
 }
@@ -104,24 +109,45 @@ export function createOperatorHttpServer(options: OperatorServerOptions): Server
         const body = await readJson(req);
         const chatId = String(body.chatId ?? '').trim();
         if (!chatId) return sendJson(res, { error: 'chatId_required' }, 400);
-        const prevSlug = (await options.store.getConversationSettings(options.tenantId, chatId)).customerSlug;
+        const prev = await options.store.getConversationSettings(options.tenantId, chatId);
+        const prevSlug = prev.customerSlug;
+        const prevProjectId = prev.perfexProjectId;
+        // perfexProjectId: number (set), null (operatör projeyi temizledi → 0 ile sıfırla),
+        // undefined (alan gönderilmedi → mevcut değer korunur). Store finite kontrol yapar.
+        const perfexProjectId =
+          typeof body.perfexProjectId === 'number' && Number.isFinite(body.perfexProjectId)
+            ? body.perfexProjectId
+            : body.perfexProjectId === null
+              ? 0
+              : undefined;
         const settings = await options.store.setConversationSettings(options.tenantId, chatId, {
           botEnabled: typeof body.botEnabled === 'boolean' ? body.botEnabled : undefined,
           tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
           note: typeof body.note === 'string' ? body.note : undefined,
           readReceipt: (body.readReceipt === 'on_reply' || body.readReceipt === 'on_open' || body.readReceipt === 'never') ? body.readReceipt : undefined,
-          customerSlug: typeof body.customerSlug === 'string' ? body.customerSlug : undefined
+          customerSlug: typeof body.customerSlug === 'string' ? body.customerSlug : undefined,
+          perfexProjectId
         });
         // Yalnızca slug GERÇEKTEN değiştiyse tetikle; aynı slug'ı tekrar set etmek bekleyen
         // medyayı yeniden kuyruğa atmasın (double-upload önler).
         if (settings.customerSlug && settings.customerSlug !== prevSlug) {
           await options.onCustomerAssigned?.(chatId, settings.customerSlug);
         }
+        // CRM eşleme (slug/proje) değiştiyse ayrı callback ile haber ver — index bunu chat_crm_mapping
+        // mirror tazelemek için kullanır. Slug değişiminde proje de sıfırlanabileceğinden her ikisi de kontrol edilir.
+        if (settings.customerSlug !== prevSlug || settings.perfexProjectId !== prevProjectId) {
+          await options.onConversationCrmChanged?.(chatId);
+        }
         return sendJson(res, { ok: true, settings });
       }
       if (req.method === 'GET' && parsed.pathname === '/api/customers') {
         const customers = options.listCustomers ? await options.listCustomers() : [];
         return sendJson(res, { customers });
+      }
+      if (req.method === 'GET' && parsed.pathname === '/api/projects') {
+        const customerSlug = String(parsed.searchParams.get('customerSlug') ?? '').trim();
+        const projects = (customerSlug && options.listProjects) ? await options.listProjects(customerSlug) : [];
+        return sendJson(res, { projects });
       }
       if (req.method === 'GET' && parsed.pathname === '/api/group-info') {
         const chatId = parsed.searchParams.get('chatId');
@@ -499,6 +525,10 @@ body{margin:0;background:var(--bg);color:var(--text)}
         <select id="convCustomer" style="width:100%;margin:4px 0;background:#2a3942;color:var(--text);border:0;border-radius:8px;padding:10px">
           <option value="">— Firma atanmadı —</option>
         </select>
+        <label class="sub" style="display:block;margin-top:6px">Perfex projesi (not/görev bu projeye düşer)</label>
+        <select id="convProject" style="width:100%;margin:4px 0;background:#2a3942;color:var(--text);border:0;border-radius:8px;padding:10px" disabled>
+          <option value="">— Önce firma seç —</option>
+        </select>
         <label class="toggle" style="padding:8px 0">
           <span>Bot bu konuşmada açık</span>
           <input id="convBotEnabled" type="checkbox" checked />
@@ -591,6 +621,8 @@ body{margin:0;background:var(--bg);color:var(--text)}
     <div class="detailRow"><div class="k">Son zaman</div><div class="v" id="detailLatestAt">—</div></div>
     <div class="detailRow"><div class="k">Okunmamış</div><div class="v" id="detailUnread">0</div></div>
     <div class="detailRow"><div class="k">Bot durumu</div><div class="v" id="detailBot">—</div></div>
+    <div class="detailRow"><div class="k">Atanan firma</div><div class="v" id="detailCustomer">—</div></div>
+    <div class="detailRow"><div class="k">Atanan proje</div><div class="v" id="detailProject">—</div></div>
     <div class="detailRow"><div class="k">Etiketler</div><div class="v" id="detailTags">—</div></div>
     <div class="detailRow"><div class="k">Not</div><div class="v" id="detailNote">—</div></div>
     <div id="detailMembersBlock" style="display:none;margin-top:12px">
@@ -668,6 +700,35 @@ body{margin:0;background:var(--bg);color:var(--text)}
         sel.appendChild(opt);
       });
       sel.value = current;
+    } catch(e){}
+  }
+
+  // Firmanın Perfex projelerini doldurur; selectedProjectId verilirse onu işaretler,
+  // tek proje varsa otomatik seçer. slug boşsa select devre dışı kalır.
+  async function loadProjects(slug, selectedProjectId){
+    var sel = $('convProject');
+    if (!slug) {
+      sel.innerHTML = '<option value="">— Önce firma seç —</option>';
+      sel.value = '';
+      sel.disabled = true;
+      return;
+    }
+    sel.disabled = false;
+    sel.innerHTML = '<option value="">— Proje atanmadı —</option>';
+    try {
+      var data = await api('/api/projects?customerSlug=' + encodeURIComponent(slug));
+      var projects = data.projects || [];
+      projects.forEach(function(p){
+        var opt = document.createElement('option');
+        opt.value = String(p.id);
+        opt.textContent = (p.name ? p.name + ' (#' + p.id + ')' : '#' + p.id);
+        sel.appendChild(opt);
+      });
+      if (selectedProjectId) {
+        sel.value = String(selectedProjectId);
+      } else if (projects.length === 1) {
+        sel.value = String(projects[0].id);
+      }
     } catch(e){}
   }
 
@@ -806,6 +867,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
     $('convNote').value = settings.note || '';
     $('convReadReceipt').value = settings.readReceipt || 'on_reply';
     $('convCustomer').value = settings.customerSlug || '';
+    await loadProjects(settings.customerSlug || '', settings.perfexProjectId);
     var tagText = (settings.tags || []).join(', ') || 'etiket yok';
     $('convSettingsStatus').textContent = (settings.botEnabled === false ? 'Bot kapalı' : 'Bot açık') + ' · ' + tagText;
     if (selectedConversation) {
@@ -975,6 +1037,36 @@ body{margin:0;background:var(--bg);color:var(--text)}
     } catch(e){ block.style.display = 'none'; }
   }
 
+  // Atanan firma/proje rozetini settings + select state'inden çözer; proje adını /api/projects'ten okur.
+  async function fillDetailCrm(s){
+    var slug = s.customerSlug || '';
+    var custEl = $('detailCustomer');
+    if (slug) {
+      var custOpt = $('convCustomer').querySelector('option[value="' + slug + '"]');
+      var custLabel = custOpt ? custOpt.textContent : slug;
+      custEl.textContent = custLabel + ' (' + slug + ')';
+    } else {
+      custEl.textContent = '—';
+    }
+    var projEl = $('detailProject');
+    var projectId = s.perfexProjectId;
+    if (slug && projectId) {
+      projEl.textContent = '#' + projectId;
+      try {
+        var data = await api('/api/projects?customerSlug=' + encodeURIComponent(slug));
+        var projects = data.projects || [];
+        for (var i=0; i<projects.length; i++) {
+          if (projects[i].id === projectId) {
+            projEl.textContent = (projects[i].name ? projects[i].name + ' (#' + projectId + ')' : '#' + projectId);
+            break;
+          }
+        }
+      } catch(e){}
+    } else {
+      projEl.textContent = '—';
+    }
+  }
+
   function openDetail(){
     if (!selectedChatId || !selectedConversation) {
       alert('Önce bir konuşma seç.');
@@ -993,6 +1085,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
     $('detailUnread').textContent = String(c.unreadCount || 0);
     var s = c.settings || { botEnabled: true, tags: [] };
     $('detailBot').textContent = s.botEnabled === false ? 'Kapalı' : 'Açık';
+    fillDetailCrm(s);
     var tagsRoot = $('detailTags');
     tagsRoot.innerHTML = '';
     if (s.tags && s.tags.length) {
@@ -1082,10 +1175,13 @@ body{margin:0;background:var(--bg);color:var(--text)}
     var botEnabled = $('convBotEnabled').checked;
     var readReceipt = $('convReadReceipt').value;
     var customerSlug = $('convCustomer').value;
+    var rawProject = $('convProject').value;
+    var perfexProjectId = rawProject ? parseInt(rawProject, 10) : null;
+    if (perfexProjectId !== null && isNaN(perfexProjectId)) perfexProjectId = null;
     var status = $('convSaveStatus');
     setSaveStatus(status, '', 'Kaydediliyor…');
     try {
-      await api('/api/conversation-settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: selectedChatId, botEnabled: botEnabled, tags: tags, note: note, readReceipt: readReceipt, customerSlug: customerSlug }) });
+      await api('/api/conversation-settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: selectedChatId, botEnabled: botEnabled, tags: tags, note: note, readReceipt: readReceipt, customerSlug: customerSlug, perfexProjectId: perfexProjectId }) });
       setSaveStatus(status, 'ok', 'Kaydedildi');
     } catch (err) {
       setSaveStatus(status, 'err', 'Hata: ' + err.message);
@@ -1095,17 +1191,37 @@ body{margin:0;background:var(--bg);color:var(--text)}
   };
 
   // Firma seçimi anında kaydedilir; atama bekleyen medyanın Drive'a yüklenmesini tetikler.
+  // Firma değişince eski proje seçimi geçersiz → projectId null ile sıfırlanır, yeni firmanın projeleri yüklenir.
   $('convCustomer').onchange = async function(){
     if (!selectedChatId) return;
     var customerSlug = $('convCustomer').value;
     var status = $('convSaveStatus');
     setSaveStatus(status, '', 'Firma atanıyor…');
     try {
-      await api('/api/conversation-settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: selectedChatId, customerSlug: customerSlug }) });
+      await api('/api/conversation-settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: selectedChatId, customerSlug: customerSlug, perfexProjectId: null }) });
       setSaveStatus(status, 'ok', customerSlug ? 'Firma atandı, bekleyen medya yükleniyor' : 'Firma kaldırıldı');
     } catch (err) {
       setSaveStatus(status, 'err', 'Hata: ' + err.message);
     }
+    await loadProjects(customerSlug);
+    await loadMessages(false);
+  };
+
+  // Proje seçimi anında kaydedilir; boş seçim projeyi temizler (null gönderilir).
+  $('convProject').onchange = async function(){
+    if (!selectedChatId) return;
+    var raw = $('convProject').value;
+    var perfexProjectId = raw ? parseInt(raw, 10) : null;
+    if (perfexProjectId !== null && isNaN(perfexProjectId)) perfexProjectId = null;
+    var status = $('convSaveStatus');
+    setSaveStatus(status, '', 'Proje atanıyor…');
+    try {
+      await api('/api/conversation-settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: selectedChatId, perfexProjectId: perfexProjectId }) });
+      setSaveStatus(status, 'ok', perfexProjectId ? 'Proje atandı' : 'Proje kaldırıldı');
+    } catch (err) {
+      setSaveStatus(status, 'err', 'Hata: ' + err.message);
+    }
+    // convCustomer.onchange ile tutarlı: liste/detay panelinin atanan proje rozetini tazele.
     await loadMessages(false);
   };
 

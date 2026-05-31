@@ -23,4 +23,20 @@ describe('runtime config', () => {
     expect(config.autoReply).toBe(false);
     expect(config.tenantId).toBe('esmark-test');
   });
+
+  it('derives groupMapPath from customersDir by default (../02-Temel/WhatsApp-Grup-Eslemesi.md)', () => {
+    const config = loadConfigFromEnv({ BOT_CUSTOMERS_DIR: '/vault/01-Musteriler' });
+
+    expect(config.customersDir).toBe('/vault/01-Musteriler');
+    expect(config.groupMapPath).toBe('/vault/02-Temel/WhatsApp-Grup-Eslemesi.md');
+  });
+
+  it('honors explicit BOT_GROUP_MAP_PATH override', () => {
+    const config = loadConfigFromEnv({
+      BOT_CUSTOMERS_DIR: '/vault/01-Musteriler',
+      BOT_GROUP_MAP_PATH: '/custom/map.md'
+    });
+
+    expect(config.groupMapPath).toBe('/custom/map.md');
+  });
 });

@@ -57,6 +57,33 @@ export interface ConversationSettings {
   note?: string;
   readReceipt: ReadReceiptMode;
   customerSlug?: string;
+  // Operatörün seçtiği Perfex proje ID — çoklu projeli müşteride hangi projeye not düşüleceğini belirler
+  perfexProjectId?: number;
+}
+
+export interface ChatCrmMapping {
+  tenantId: string;
+  chatId: string;
+  customerSlug?: string;
+  perfexClientId?: number;
+  perfexProjectId?: number;
+  projectName?: string;
+  repoPath?: string;
+  updatedAt: string;
+}
+
+export interface CustomerCardInfo {
+  slug: string;
+  name: string;
+  perfexClientId?: number;
+  perfexProjectIds: { id: number; name?: string }[];
+  repoPath?: string;
+  perfexLeadId?: number;
+}
+
+export interface ProjectOption {
+  id: number;
+  name: string;
 }
 
 export interface ConversationSummary {

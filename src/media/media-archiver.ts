@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { rm } from 'node:fs/promises';
+import { normalizeSlug } from '../customer/slug.js';
 import type { MediaKind } from '../types.js';
 import type { MessageStore } from '../store/sqlite-message-store.js';
 
@@ -178,7 +179,7 @@ export function createMediaArchiver(deps: MediaArchiverDeps): MediaArchiver {
     },
 
     async onCustomerAssigned(chatId: string, slug: string): Promise<void> {
-      const normalized = (slug || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+      const normalized = normalizeSlug(slug || '');
       if (!normalized) return;
       // dispatchUpload slug'ı (artık atanmış) settings'ten okur ve grup ise grup adını çözer.
       const pending = await store.listPendingMediaByChat(tenantId, chatId);
