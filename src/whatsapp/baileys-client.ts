@@ -216,7 +216,13 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
 
       // WhatsApp mesaj düzenleme (edit): Baileys MESSAGE_EDIT'i messages.update ile iletir.
       const edit = parseMessageEdit(u);
-      if (edit) void options.onMessageEdited?.(edit.messageId, edit.newText, edit.editedAt);
+      if (edit) {
+        console.log(`[edit] düzenleme alındı: id=…${edit.messageId.slice(-6)} yeni="${edit.newText.slice(0, 40)}"`);
+        void options.onMessageEdited?.(edit.messageId, edit.newText, edit.editedAt);
+      } else if (u.update?.message) {
+        // Teşhis: message taşıyan ama edit olarak parse edilemeyen update — zarf farklı olabilir.
+        console.log(`[edit?] message taşıyan update parse edilemedi: keys=${Object.keys(u.update.message).join(',')}`);
+      }
     }
   });
 
