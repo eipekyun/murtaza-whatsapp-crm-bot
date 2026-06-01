@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extForMime, mediaExceedsLimit, safeSegment, toInboundMessage } from '../src/whatsapp/baileys-client.js';
+import { extForMime, mediaExceedsLimit, parseMessageEdit, safeSegment, toInboundMessage } from '../src/whatsapp/baileys-client.js';
 import type { RuntimeConfig } from '../src/config.js';
 
 const config: RuntimeConfig = {
@@ -45,6 +45,46 @@ describe('baileys inbound message mapping', () => {
     expect(inbound?.chatId).toBe('905322013401@s.whatsapp.net');
     expect(inbound?.senderPhone).toBe('905322013401');
     expect(inbound?.text).toBe('Merhaba');
+  });
+});
+
+describe('parseMessageEdit (WhatsApp mesaj düzenleme)', () => {
+  it('conversation edit → orijinal messageId + yeni metin + editedAt (timestamp)', () => {
+    const edit = parseMessageEdit({
+      key: { id: 'orig-1' },
+      update: {
+        message: { editedMessage: { message: { conversation: 'düzeltilmiş metin' } } },
+        messageTimestamp: 1778603400
+      }
+    });
+    expect(edit).not.toBeNull();
+    expect(edit?.messageId).toBe('orig-1');
+    expect(edit?.newText).toBe('düzeltilmiş metin');
+    expect(edit?.editedAt.getTime()).toBe(1778603400 * 1000);
+  });
+
+  it('extendedTextMessage düzenleme metnini çıkarır', () => {
+    const edit = parseMessageEdit({
+      key: { id: 'orig-2' },
+      update: { message: { editedMessage: { message: { extendedTextMessage: { text: 'uzun düzeltme' } } } } }
+    });
+    expect(edit?.newText).toBe('uzun düzeltme');
+  });
+
+  it('düzenleme olmayan (yalnız status) update → null', () => {
+    expect(parseMessageEdit({ key: { id: 'm1' }, update: { } })).toBeNull();
+  });
+
+  it('key.id yoksa → null', () => {
+    expect(
+      parseMessageEdit({ key: {}, update: { message: { editedMessage: { message: { conversation: 'x' } } } } })
+    ).toBeNull();
+  });
+
+  it('düzenleme içeriği boş metinse → null', () => {
+    expect(
+      parseMessageEdit({ key: { id: 'm2' }, update: { message: { editedMessage: { message: { conversation: '' } } } } })
+    ).toBeNull();
   });
 });
 

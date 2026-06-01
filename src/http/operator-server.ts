@@ -1027,6 +1027,14 @@ body{margin:0;background:var(--bg);color:var(--text)}
       var body = document.createElement('span'); body.className='body'; body.textContent = m.text || '';
       el.appendChild(body);
 
+      if (m.editedAt) {
+        var ed = document.createElement('span');
+        ed.textContent = ' (düzenlendi)';
+        ed.style.cssText = 'font-size:11px;opacity:0.6;font-style:italic';
+        ed.title = 'Düzenlendi: ' + fmtTime(m.editedAt);
+        el.appendChild(ed);
+      }
+
       var when = m.receivedAt || m.sentAt;
       if (when) {
         var t = document.createElement('span'); t.className='time'; t.textContent = fmtTime(when);

@@ -19,6 +19,8 @@ export interface InboundMessage {
   mediaDriveId?: string;
   mediaDriveUrl?: string;
   mediaUploadStatus?: MediaUploadStatus;
+  // WhatsApp mesaj düzenleme (edit) zamanı (ISO). Set ise mesaj gönderildikten sonra düzenlendi.
+  editedAt?: string;
   receivedAt: Date;
 }
 
@@ -46,6 +48,8 @@ export interface OutboundMessage {
   mediaDriveUrl?: string;
   mediaUploadStatus?: MediaUploadStatus;
   status?: number;
+  // WhatsApp mesaj düzenleme (edit) zamanı (ISO). Set ise mesaj gönderildikten sonra düzenlendi.
+  editedAt?: string;
   sentAt: Date;
 }
 

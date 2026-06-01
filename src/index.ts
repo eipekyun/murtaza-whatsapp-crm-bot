@@ -103,6 +103,8 @@ async function main(): Promise<void> {
     onOutboundSent: (message) => store.saveOutbound(message),
     onContactName: (jid, name, source) => store.saveContactName(config.tenantId, jid, name, source),
     onMessageStatus: (messageId, status) => store.updateMessageStatus(config.tenantId, messageId, status),
+    onMessageEdited: (messageId, newText, editedAt) =>
+      store.updateMessageText(config.tenantId, messageId, newText, editedAt.toISOString()),
     onAfterReply: (chatId) => applyReadReceipt(chatId, 'reply'),
     getBotReplyDelayMs: () => botReplyDelayMs,
     shouldStillReply: async (chatId, sinceIso) => {

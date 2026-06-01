@@ -112,4 +112,45 @@ describe('sqlite message store outbound/operator views', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('updateMessageText düzenlenen mesajın metnini günceller + editedAt işaretler', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'murtaza-store-'));
+    try {
+      const store = createSqliteMessageStore(join(dir, 'test.sqlite'));
+
+      await store.saveInbound({
+        tenantId: 'esmark-test',
+        channel: 'whatsapp',
+        provider: 'baileys',
+        direction: 'inbound',
+        messageId: 'grp-edit-1',
+        chatId: '120363000@g.us',
+        senderPhone: '905322013401',
+        senderDisplayName: 'Ersin',
+        text: 'ilk hali',
+        receivedAt: new Date('2026-05-12T17:00:00.000Z')
+      });
+
+      // Düzenlemeden önce: orijinal metin, editedAt yok
+      let messages = await store.listMessagesByChat('esmark-test', '120363000@g.us');
+      expect(messages[0]).toMatchObject({ text: 'ilk hali' });
+      expect(messages[0].editedAt).toBeUndefined();
+
+      await store.updateMessageText('esmark-test', 'grp-edit-1', 'düzeltilmiş hali', '2026-05-12T17:05:00.000Z');
+
+      messages = await store.listMessagesByChat('esmark-test', '120363000@g.us');
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({ text: 'düzeltilmiş hali', editedAt: '2026-05-12T17:05:00.000Z' });
+
+      // Bilinmeyen messageId güvenli (0 satır), boş metin no-op
+      await store.updateMessageText('esmark-test', 'yok-boyle-id', 'x', '2026-05-12T18:00:00.000Z');
+      await store.updateMessageText('esmark-test', 'grp-edit-1', '', '2026-05-12T18:00:00.000Z');
+      messages = await store.listMessagesByChat('esmark-test', '120363000@g.us');
+      expect(messages[0]).toMatchObject({ text: 'düzeltilmiş hali', editedAt: '2026-05-12T17:05:00.000Z' });
+
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

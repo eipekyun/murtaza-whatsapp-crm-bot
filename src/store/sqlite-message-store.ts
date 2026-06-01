@@ -26,6 +26,7 @@ interface MessageRow {
   media_upload_status: string | null;
   received_at: string;
   status: number | null;
+  edited_at: string | null;
 }
 
 export interface MediaServeInfo {
@@ -75,6 +76,8 @@ export interface MessageStore {
   saveOutbound(message: OutboundMessage): Promise<void>;
   saveContactName(tenantId: string, jid: string, name: string, source?: string): Promise<void>;
   updateMessageStatus(tenantId: string, messageId: string, status: number): Promise<void>;
+  // WhatsApp mesaj düzenleme: orijinal mesajın metnini günceller + edited_at işaretler.
+  updateMessageText(tenantId: string, messageId: string, newText: string, editedAt: string): Promise<void>;
   markChatRead(tenantId: string, chatId: string): Promise<void>;
   getUnreadInboundKeys(tenantId: string, chatId: string): Promise<Array<{ chatId: string; messageId: string; senderPhone: string }>>;
   listMessages(tenantId: string): Promise<InboundMessage[]>;
@@ -174,6 +177,7 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
   ensureColumn(db, 'messages', 'media_drive_url', 'TEXT');
   ensureColumn(db, 'messages', 'media_upload_status', 'TEXT');
   ensureColumn(db, 'messages', 'status', 'INTEGER');
+  ensureColumn(db, 'messages', 'edited_at', 'TEXT');
   ensureColumn(db, 'contact_names', 'push_name', 'TEXT');
 
   const insert = db.prepare<[string, string, string, string, string | null, string, string, string, string | null, string, string | null, string | null, string | null, string | null, string, number | null]>(`
@@ -186,7 +190,7 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
   const selectColumns = `
     SELECT tenant_id, channel, provider, direction, origin, message_id, chat_id,
            sender_phone, sender_display_name, text, media_kind, media_name, media_mime, media_data,
-           media_local_path, media_drive_id, media_drive_url, media_upload_status, received_at, status
+           media_local_path, media_drive_id, media_drive_url, media_upload_status, received_at, status, edited_at
     FROM messages
   `;
 
@@ -207,6 +211,11 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
   const updateStatusStmt = db.prepare<[number, string, string, number]>(`
     UPDATE messages SET status = ?
     WHERE tenant_id = ? AND message_id = ? AND (status IS NULL OR status < ?)
+  `);
+
+  const updateTextStmt = db.prepare<[string, string, string, string]>(`
+    UPDATE messages SET text = ?, edited_at = ?
+    WHERE tenant_id = ? AND message_id = ?
   `);
 
   const unreadKeysStmt = db.prepare<[string, string, string], { chat_id: string; message_id: string; sender_phone: string }>(`
@@ -493,6 +502,11 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
       updateStatusStmt.run(status, tenantId, messageId, status);
     },
 
+    async updateMessageText(tenantId: string, messageId: string, newText: string, editedAt: string): Promise<void> {
+      if (!messageId || !newText) return;
+      updateTextStmt.run(newText, editedAt, tenantId, messageId);
+    },
+
     async markChatRead(tenantId: string, chatId: string): Promise<void> {
       if (!chatId) return;
       const now = new Date().toISOString();
@@ -765,6 +779,7 @@ function rowToStoredMessage(row: MessageRow): StoredMessage {
       mediaDriveUrl: row.media_drive_url ?? undefined,
       mediaUploadStatus: normalizeUploadStatus(row.media_upload_status),
       status: row.status ?? undefined,
+      editedAt: row.edited_at ?? undefined,
       sentAt: new Date(row.received_at)
     };
   }
@@ -791,6 +806,7 @@ function rowToInboundMessage(row: MessageRow): InboundMessage {
     mediaDriveId: row.media_drive_id ?? undefined,
     mediaDriveUrl: row.media_drive_url ?? undefined,
     mediaUploadStatus: normalizeUploadStatus(row.media_upload_status),
+    editedAt: row.edited_at ?? undefined,
     receivedAt: new Date(row.received_at)
   };
 }

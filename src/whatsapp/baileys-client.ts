@@ -41,6 +41,8 @@ export interface BaileysClientOptions {
   onSocketReady?: (sock: WASocket) => void;
   onContactName?: (jid: string, name: string, source?: string) => Promise<void> | void;
   onMessageStatus?: (messageId: string, status: number) => Promise<void> | void;
+  // WhatsApp mesaj düzenleme (edit): orijinal messageId + yeni metin + düzenleme zamanı.
+  onMessageEdited?: (messageId: string, newText: string, editedAt: Date) => Promise<void> | void;
   onAfterReply?: (chatId: string) => Promise<void> | void;
   onConnectionState?: (state: string, me?: string) => void;
   getBotReplyDelayMs?: () => number;
@@ -210,8 +212,11 @@ export async function startBaileysClient(config: RuntimeConfig, router: MessageR
   sock.ev.on('messages.update', (updates) => {
     for (const u of updates) {
       const id = u.key?.id;
-      const status = u.update?.status;
-      if (id && typeof status === 'number') void options.onMessageStatus?.(id, status);
+      if (id && typeof u.update?.status === 'number') void options.onMessageStatus?.(id, u.update.status);
+
+      // WhatsApp mesaj düzenleme (edit): Baileys MESSAGE_EDIT'i messages.update ile iletir.
+      const edit = parseMessageEdit(u);
+      if (edit) void options.onMessageEdited?.(edit.messageId, edit.newText, edit.editedAt);
     }
   });
 
@@ -332,6 +337,32 @@ function extractText(message: proto.IMessage | null | undefined): string | null 
     message.documentMessage?.caption ||
     null
   );
+}
+
+// Baileys messages.update girdisi (yalnız edit-parse için gereken alanlar).
+export interface MessageUpdateEntry {
+  key: { id?: string | null };
+  update: {
+    message?: proto.IMessage | null;
+    messageTimestamp?: number | { toString(): string } | null;
+  } | null;
+}
+
+// WhatsApp mesaj düzenleme (edit) bilgisini messages.update girdisinden çıkarır.
+// Baileys MESSAGE_EDIT'i messages.update ile iletir: key.id düzenlenen orijinal mesajdır,
+// update.message.editedMessage.message yeni içeriktir (process-message.js MESSAGE_EDIT).
+// Düzenleme/yeni metin yoksa null döner (saf, test edilebilir).
+export function parseMessageEdit(u: MessageUpdateEntry): { messageId: string; newText: string; editedAt: Date } | null {
+  const id = u.key?.id;
+  if (!id) return null;
+  const editedContent = u.update?.message?.editedMessage?.message;
+  if (!editedContent) return null;
+  const newText = extractText(editedContent);
+  if (!newText) return null;
+  const tsRaw = u.update?.messageTimestamp;
+  const tsSec = typeof tsRaw === 'number' ? tsRaw : tsRaw ? Number(tsRaw.toString()) : 0;
+  const editedAt = Number.isFinite(tsSec) && tsSec > 0 ? new Date(tsSec * 1000) : new Date();
+  return { messageId: id, newText, editedAt };
 }
 
 // Canlı inbound medyayı buffer olarak indirir, yerel geçici dosyaya yazar, onIncomingMedia tetikler.
