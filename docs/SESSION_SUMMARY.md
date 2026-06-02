@@ -1,6 +1,19 @@
 # SESSION_SUMMARY — murtaza-whatsapp-crm-bot
 
-Son güncelleme: 2026-06-02 (Faz 3 çekirdek — Opus extraction → aday panel; + mesaj düzenleme fix)
+Son güncelleme: 2026-06-02 (Faz 4 — aday → onay → Perfex'e görev YAZMA; ilk canlı yazma doğrulandı)
+
+## 2026-06-02 — Faz 4: Aday → Telegram onay → Perfex'e görev yazma (CANLI DOĞRULANDI)
+
+Akış: panel "Onaya Sun" → `POST /api/submit-candidate` → `index.submitCandidate` (rel çöz: proje varsa `project` yoksa `client`; per-task `dedup_hash`; **atomik CAS draft→sent**) → `approval-requester.ts` (spawn+stdin, PII args'ta yok) → `request_approval.py --from-stdin` → Telegram 3-buton. Onayda gateway (deterministik resolve, `.hermes-source` PID 2737060) → `resolve_approval._apply_action` **`perfex_task_create`** → `perfex_recorder.create_task` (`_sql_quote` escape, hash-marker dedup, INSERT+re-query, readback) → bot DB `written`.
+
+- **Hermes (additive, yedekli `.faz4-backup-20260602-102001`):** `perfex_recorder.create_task`+`find_task_by_marker` (rel_type whitelist project|client, dedup), `resolve_approval` perfex_task_create case + `_apply_perfex_task_create` + `_update_bot_candidate` (cross-process bot DB UPDATE, prefix-guard), `request_approval.py --from-stdin` CLI. ⚠️ `~/.hermes` git DEĞİL → **Hermes update'inde re-apply gerekir** (yedekten).
+- **Bot:** `src/approval/approval-requester.ts` (YENI), config `requestApprovalScript`, operator-server submit endpoint+panel buton+status badge, index submitCandidate + store `tryReserveCandidateForApproval` (CAS).
+- **Güvenlik (review):** 1 HIGH (suggested_due regex — bozuk LLM tarihi NULL) + 2 MEDIUM (atomik CAS çift-onay; bot_db_path prefix whitelist) + 1 LOW düzeltildi. 0 CRITICAL. auto-write YOK — her görev Telegram onayından geçer.
+- **Kalite:** tsc temiz, **144 test**, py_compile temiz. Commit `732167e` + `b5ae2f7` (bot_db_path mutlak path fix — config.dbPath göreceliydi).
+- **CANLI İLK YAZMA (doğrulandı):** Atölye Bambini grubu eşlendi (client=7, proje=21 Dijital Pazarlama) → re-extract aday #2 (3 görev) → onaya sun → Ersin ✅ → Perfex'e **511/512/513** yazıldı (staffid=3, proje 21), aday #2 → `written` [511,512,513], dedup marker'lar doğrulandı (idempotent). job `approval-7949f6b6bac1` published.
+- **Not:** Perfex MySQL sunucu saati UTC+3 (Türkiye); dateadded 14:57 = 11:57 UTC. İlk job'da bot_db_path göreceli yakalandı (gate işe yaradı), job patch'lendi + `b5ae2f7` ile kalıcı düzeltildi.
+
+
 
 ## 2026-06-02 — Faz 3 çekirdek: Grup mesajından Opus ile aday özet/görev çıkarımı (Perfex YAZMA YOK)
 
