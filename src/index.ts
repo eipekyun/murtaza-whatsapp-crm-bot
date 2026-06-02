@@ -11,6 +11,7 @@ import { startBaileysClient, type BaileysClientOptions } from './whatsapp/bailey
 import { createDrivePythonRunner, createMediaArchiver } from './media/media-archiver.js';
 import { createPerfexReader } from './perfex/perfex-reader.js';
 import { createExtractionRunner } from './candidate/extraction-runner.js';
+import { createApprovalRequester } from './approval/approval-requester.js';
 import { readCustomerCard } from './customer/customer-card-reader.js';
 import { parseGroupMappings, upsertGroupMapping } from './customer/vault-group-mapping.js';
 import { normalizePhone, normalizeWhitelist } from './phone.js';
@@ -56,6 +57,11 @@ async function main(): Promise<void> {
     python: config.perfexQueryPython,
     scriptPath: config.waExtractScript,
     dbPath: config.dbPath
+  });
+  // Onay isteği köprüsü: aday → request_approval.py (Telegram 3-buton). requestApproval throw etmez.
+  const approvalRequester = createApprovalRequester({
+    python: config.perfexQueryPython,
+    scriptPath: config.requestApprovalScript
   });
   // Restart recovery (2/2): bekleyen + başarısız tüm medyayı (firma vs inbox kararıyla) yeniden
   // kuyruğa al. enqueue arka planda seri çalışır; startup'ı bloklamaz.
@@ -260,6 +266,85 @@ async function main(): Promise<void> {
     return store.listGroupCandidates(config.tenantId, chatId);
   }
 
+  // Panel "Onaya Sun" butonu: aday → rel çöz (proje varsa project, yoksa client; ikisi de yoksa hata) →
+  // her görev için dedup_hash (candidate.hash + '|' + task.title, sha256, 16 hex) → on_approve payload →
+  // request_approval.py (Telegram 3-buton). Onay gelince Hermes resolve_approval perfex_task_create
+  // aksiyonunu deterministik uygular. ok ise aday status:'sent' + approvalJobId.
+  async function submitCandidate(candidateId: number): Promise<{ ok: boolean; jobId?: string; error?: string }> {
+    try {
+      const candidate = store.getGroupCandidate(config.tenantId, candidateId);
+      if (!candidate) return { ok: false, error: 'aday bulunamadı' };
+      if (candidate.status !== 'draft') return { ok: false, error: 'aday zaten onaya sunulmuş' };
+      const tasks = candidate.tasks ?? [];
+      if (tasks.length === 0) return { ok: false, error: 'adayda görev yok' };
+
+      // rel çöz: proje atanmışsa project, yoksa client; ikisi de yoksa grup CRM'e eşli değil.
+      let relType: 'project' | 'client';
+      let relId: number;
+      if (candidate.perfexProjectId !== undefined) {
+        relType = 'project';
+        relId = candidate.perfexProjectId;
+      } else if (candidate.perfexClientId !== undefined) {
+        relType = 'client';
+        relId = candidate.perfexClientId;
+      } else {
+        return { ok: false, error: 'grup eşli değil' };
+      }
+
+      const payloadTasks = tasks.map((t) => ({
+        title: t.title,
+        description: t.description,
+        priority: t.priority,
+        ...(t.suggestedDue ? { suggested_due: t.suggestedDue } : { suggested_due: null }),
+        dedup_hash: createHash('sha256').update(candidate.hash + '|' + t.title).digest('hex').slice(0, 16)
+      }));
+
+      const onApprove: Record<string, unknown> = {
+        action: 'perfex_task_create',
+        rel_type: relType,
+        rel_id: relId,
+        tasks: payloadTasks,
+        candidate_id: candidateId,
+        tenant_id: config.tenantId,
+        bot_db_path: config.dbPath
+      };
+
+      const titleStr = `Perfex görev onayı (${payloadTasks.length})`;
+      const bodyStr = [
+        candidate.summary ? candidate.summary : '(özet yok)',
+        '',
+        ...payloadTasks.map((t, i) => `${i + 1}. ${t.title}`)
+      ].join('\n');
+
+      // Atomik rezervasyon: draft→sent CAS. Onay isteği (~30sn) öncesi rezerve et ki aynı
+      // adaydan paralel ikinci istek çift Telegram onayı/job oluşturmasın (TOCTOU penceresi).
+      if (!store.tryReserveCandidateForApproval(config.tenantId, candidateId)) {
+        return { ok: false, error: 'aday zaten onaya sunulmuş' };
+      }
+
+      const result = await approvalRequester.requestApproval({
+        kind: 'perfex_task_create',
+        title: titleStr,
+        body: bodyStr,
+        on_approve: onApprove,
+        ...(candidate.customerSlug ? { customer_slug: candidate.customerSlug } : {})
+      });
+
+      if (!result.ok) {
+        // Onay isteği başarısız → rezervasyonu geri al ki operatör tekrar deneyebilsin.
+        store.updateGroupCandidate(config.tenantId, candidateId, { status: 'draft' });
+        return { ok: false, error: result.error ?? 'onay isteği başarısız' };
+      }
+
+      if (result.jobId) {
+        store.updateGroupCandidate(config.tenantId, candidateId, { approvalJobId: result.jobId });
+      }
+      return { ok: true, ...(result.jobId ? { jobId: result.jobId } : {}) };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'onaya sunulamadı' };
+    }
+  }
+
   // Operatör panelden firma/proje değiştirince chat_crm_mapping mirror'ını tazeler ve
   // vault eşleme dosyasını günceller. Slug conversation_settings'ten; perfexClientId/projectName/
   // repoPath karttan zenginleştirilir. Tek projeli kartta seçim yoksa o proje otomatik alınır.
@@ -436,6 +521,7 @@ async function main(): Promise<void> {
     getPerfexTasks: (chatId) => getPerfexTasks(chatId),
     extractGroup: (chatId) => extractGroup(chatId),
     listCandidates: async (chatId) => listCandidates(chatId),
+    submitCandidate: (candidateId) => submitCandidate(candidateId),
     getMediaFile: (messageId) => resolveMediaFile(messageId),
     getGroupInfo: (chatId) => resolveGroupInfo(chatId),
     getAutoReplyAudience: () => autoReplyAudience,

@@ -34,6 +34,9 @@ export interface RuntimeConfig {
   // WhatsApp grup → görev adayı çıkarma köprüsü (scripts/wa-extract.py).
   // python için perfexQueryPython yeniden kullanılır; dbPath mevcut config.dbPath.
   waExtractScript: string;
+  // Onay isteği köprüsü (Hermes orchestrator request_approval.py).
+  // python için perfexQueryPython yeniden kullanılır; payload STDIN'den geçer (PII args'ta yok).
+  requestApprovalScript: string;
 }
 
 type Env = Record<string, string | undefined>;
@@ -71,7 +74,10 @@ export function loadConfigFromEnv(env: Env = process.env): RuntimeConfig {
       `${homedir()}/.local/share/pipx/venvs/hermes-agent/bin/python3`,
     perfexQueryScript: env.BOT_PERFEX_QUERY_SCRIPT?.trim() || resolve(process.cwd(), 'scripts', 'perfex-query.py'),
     perfexOpsEnvPath: expandHome(env.BOT_PERFEX_OPS_ENV?.trim() || '~/.config/murtaza-vps-ops.env'),
-    waExtractScript: env.BOT_WA_EXTRACT_SCRIPT?.trim() || resolve(process.cwd(), 'scripts', 'wa-extract.py')
+    waExtractScript: env.BOT_WA_EXTRACT_SCRIPT?.trim() || resolve(process.cwd(), 'scripts', 'wa-extract.py'),
+    requestApprovalScript:
+      env.BOT_REQUEST_APPROVAL_SCRIPT?.trim() ||
+      '/home/murtaza/.hermes/profiles/murtaza/scripts/orchestrator/request_approval.py'
   };
 }
 

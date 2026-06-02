@@ -26,7 +26,8 @@ const config: RuntimeConfig = {
   perfexQueryPython: '/usr/bin/python3',
   perfexQueryScript: './scripts/perfex-query.py',
   perfexOpsEnvPath: '/home/murtaza/.config/murtaza-vps-ops.env',
-  waExtractScript: './scripts/wa-extract.py'
+  waExtractScript: './scripts/wa-extract.py',
+  requestApprovalScript: '/home/murtaza/.hermes/profiles/murtaza/scripts/orchestrator/request_approval.py'
 };
 
 describe('baileys inbound message mapping', () => {

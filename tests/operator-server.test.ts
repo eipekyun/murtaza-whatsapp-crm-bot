@@ -75,6 +75,7 @@ function fakeStore(saved: OutboundMessage[] = [], opts: FakeStoreOptions = {}): 
     listGroupCandidates: () => [],
     getGroupCandidate: () => undefined,
     updateGroupCandidateStatus: () => {},
+    tryReserveCandidateForApproval: () => true,
     updateGroupCandidate: () => {},
     close: () => {}
   };
@@ -472,6 +473,101 @@ describe('operator HTTP API', () => {
       expect(response.status).toBe(200);
       const body = await response.json();
       expect(body).toMatchObject({ tasks: [], projects: [], error: 'perfex devre dışı' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('submits a candidate for approval via /api/submit-candidate', async () => {
+    const store = fakeStore();
+    const calls: number[] = [];
+    const server = createOperatorHttpServer({
+      tenantId: 'esmark-test',
+      store,
+      whitelistPhones: [],
+      authToken: TEST_TOKEN,
+      sendWhatsAppMessage: async () => 'unused',
+      submitCandidate: async (candidateId: number) => {
+        calls.push(candidateId);
+        return { ok: true, jobId: 'job-abc' };
+      }
+    });
+
+    server.listen(0);
+    await once(server, 'listening');
+    try {
+      const response = await authedFetch(url(server, '/api/submit-candidate'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ candidateId: 7 })
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(calls).toEqual([7]);
+      expect(body).toMatchObject({ ok: true, jobId: 'job-abc' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('rejects /api/submit-candidate when candidateId is not a number', async () => {
+    const store = fakeStore();
+    const calls: number[] = [];
+    const server = createOperatorHttpServer({
+      tenantId: 'esmark-test',
+      store,
+      whitelistPhones: [],
+      authToken: TEST_TOKEN,
+      sendWhatsAppMessage: async () => 'unused',
+      submitCandidate: async (candidateId: number) => { calls.push(candidateId); return { ok: true }; }
+    });
+
+    server.listen(0);
+    await once(server, 'listening');
+    try {
+      const missing = await authedFetch(url(server, '/api/submit-candidate'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      expect(missing.status).toBe(400);
+      const missingBody = await missing.json();
+      expect(missingBody.error).toBe('candidateId_required');
+
+      const wrongType = await authedFetch(url(server, '/api/submit-candidate'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ candidateId: 'abc' })
+      });
+      expect(wrongType.status).toBe(400);
+
+      expect(calls).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('returns a disabled envelope when submitCandidate is not wired', async () => {
+    const store = fakeStore();
+    const server = createOperatorHttpServer({
+      tenantId: 'esmark-test',
+      store,
+      whitelistPhones: [],
+      authToken: TEST_TOKEN,
+      sendWhatsAppMessage: async () => 'unused'
+    });
+
+    server.listen(0);
+    await once(server, 'listening');
+    try {
+      const response = await authedFetch(url(server, '/api/submit-candidate'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ candidateId: 3 })
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toMatchObject({ ok: false, error: 'onaya sunma devre dışı' });
     } finally {
       server.close();
     }

@@ -71,6 +71,9 @@ export interface OperatorServerOptions {
   extractGroup?: (chatId: string) => Promise<{ ok: boolean; candidateId?: number; error?: string }>;
   // Bir grubun kayıtlı görev adaylarını (created_at DESC) döner.
   listCandidates?: (chatId: string) => Promise<GroupCandidate[]>;
+  // Bir görev adayını onaya sunar: rel çözümü + per-task dedup_hash + on_approve payload kurup
+  // request_approval.py'ye iletir, aday status'unu 'sent' yapar (index wiring'i bağlar).
+  submitCandidate?: (candidateId: number) => Promise<{ ok: boolean; jobId?: string; error?: string }>;
 }
 
 export function createOperatorHttpServer(options: OperatorServerOptions): Server {
@@ -182,6 +185,18 @@ export function createOperatorHttpServer(options: OperatorServerOptions): Server
         if (!chatId) return sendJson(res, { error: 'chatId_required' }, 400);
         const candidates = options.listCandidates ? await options.listCandidates(chatId) : [];
         return sendJson(res, { candidates });
+      }
+      if (req.method === 'POST' && parsed.pathname === '/api/submit-candidate') {
+        const body = await readJson(req);
+        // candidateId sayı değilse 400 (NaN/string/undefined hepsi elenir).
+        const candidateId = typeof body.candidateId === 'number' && Number.isFinite(body.candidateId)
+          ? body.candidateId
+          : undefined;
+        if (candidateId === undefined) return sendJson(res, { error: 'candidateId_required' }, 400);
+        const result = options.submitCandidate
+          ? await options.submitCandidate(candidateId)
+          : { ok: false, error: 'onaya sunma devre dışı' };
+        return sendJson(res, result);
       }
       if (req.method === 'GET' && parsed.pathname === '/api/group-info') {
         const chatId = parsed.searchParams.get('chatId');
@@ -520,6 +535,12 @@ body{margin:0;background:var(--bg);color:var(--text)}
 .prio-3{background:#5a4a1a;color:#f5c542}
 .prio-4{background:#5a2330;color:#ff9b9b}
 .taskErr{color:#ff9b9b;font-size:12px}
+.candStatusBadge{display:inline-block;font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;margin-left:6px;vertical-align:middle}
+.cand-draft{background:#2a3942;color:#aebac1}
+.cand-sent{background:#5a4a1a;color:#f5c542}
+.cand-written{background:#1f4d3a;color:#7fe3b8}
+.candTaskIds{color:var(--muted);font-size:11px;margin-top:4px}
+.submitCandidateBtn{margin-top:10px}
 
 @media(max-width:900px){.app{grid-template-columns:1fr}.right{display:none}.left{display:none}.msg{max-width:88%}}
 </style>
@@ -878,7 +899,18 @@ body{margin:0;background:var(--bg);color:var(--text)}
     $('candidateTasks').innerHTML = '';
   }
 
+  // Aday status etiketini (draft/sent/written...) okunur metne çevirir.
+  function candStatusLabel(s){
+    if (s === 'draft') return 'Taslak';
+    if (s === 'sent') return 'Onaya gönderildi';
+    if (s === 'approved') return 'Onaylandı';
+    if (s === 'written') return 'Perfex\'e yazıldı';
+    if (s === 'discarded') return 'İptal';
+    return s || 'Taslak';
+  }
+
   // En yeni adayın özet + görevlerini render eder (Perfex görev listesi stiliyle aynı).
+  // status badge (draft/sent/written) + perfex_task_ids varsa gösterir; draft ise "Onaya Sun" butonu.
   function renderCandidate(c){
     var summaryEl = $('candidateSummary');
     var tasksEl = $('candidateTasks');
@@ -887,7 +919,20 @@ body{margin:0;background:var(--bg);color:var(--text)}
     if (!c) { $('candidateStatus').textContent = 'Henüz aday yok.'; return; }
     summaryEl.textContent = c.summary || '';
     var tasks = c.tasks || [];
-    $('candidateStatus').textContent = tasks.length + ' görev adayı · ' + (c.status || 'draft');
+    var status = c.status || 'draft';
+    var statusEl = $('candidateStatus');
+    statusEl.textContent = tasks.length + ' görev adayı · ';
+    var badge = document.createElement('span');
+    badge.className = 'candStatusBadge cand-' + status;
+    badge.textContent = candStatusLabel(status);
+    statusEl.appendChild(badge);
+    var taskIds = c.perfexTaskIds || [];
+    if (taskIds.length) {
+      var idsEl = document.createElement('div');
+      idsEl.className = 'candTaskIds';
+      idsEl.textContent = 'Perfex görev: ' + taskIds.map(function(id){ return '#' + id; }).join(', ');
+      summaryEl.appendChild(idsEl);
+    }
     tasks.forEach(function(t){
       var row = document.createElement('div'); row.className = 'taskRow';
       var main = document.createElement('div'); main.className = 'taskMain';
@@ -907,6 +952,38 @@ body{margin:0;background:var(--bg);color:var(--text)}
       row.appendChild(prio);
       tasksEl.appendChild(row);
     });
+    // Yalnız 'draft' adaylar onaya sunulabilir; sent/written zaten akışta.
+    if (status === 'draft' && tasks.length) {
+      var submitBtn = document.createElement('button');
+      submitBtn.className = 'btn primary submitCandidateBtn';
+      submitBtn.textContent = 'Onaya Sun';
+      submitBtn.onclick = function(){ submitCandidate(c.id, submitBtn); };
+      tasksEl.appendChild(submitBtn);
+    }
+  }
+
+  // "Onaya Sun" akışı: aday → /api/submit-candidate → Telegram 3-buton onayına gider.
+  // Başarılıda "onaya gönderildi" + adayları tazele (status 'sent' olur).
+  async function submitCandidate(candidateId, btn){
+    if (typeof candidateId !== 'number') { alert('Aday id yok'); return; }
+    var status = $('candidateStatus');
+    if (btn) btn.disabled = true;
+    status.textContent = 'Onaya gönderiliyor…';
+    var data;
+    try {
+      data = await api('/api/submit-candidate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ candidateId: candidateId }) });
+    } catch (err) {
+      status.textContent = 'Onaya gönderilemedi: ' + err.message;
+      if (btn) btn.disabled = false;
+      return;
+    }
+    if (!data.ok) {
+      status.textContent = 'Onaya gönderilemedi: ' + (data.error || 'bilinmeyen hata');
+      if (btn) btn.disabled = false;
+      return;
+    }
+    status.textContent = 'Onaya gönderildi ✓ (Telegram\'dan onayla)';
+    await loadCandidates();
   }
 
   // En yeni kayıtlı adayı çeker (varsa) ve render eder. Buton akışından sonra ve sohbet açılışında çağrılabilir.

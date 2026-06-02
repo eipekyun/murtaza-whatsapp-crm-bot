@@ -129,6 +129,8 @@ export interface MessageStore {
   listGroupCandidates(tenantId: string, chatId: string): GroupCandidate[];
   getGroupCandidate(tenantId: string, id: number): GroupCandidate | undefined;
   updateGroupCandidateStatus(tenantId: string, id: number, status: CandidateStatus): void;
+  // Atomik rezervasyon: yalnız 'draft' iken 'sent'e çevirir (CAS); başarılıysa true. Çift onayı önler.
+  tryReserveCandidateForApproval(tenantId: string, id: number): boolean;
   updateGroupCandidate(tenantId: string, id: number, patch: Partial<Pick<GroupCandidate, 'summary' | 'tasks' | 'status' | 'approvalJobId' | 'perfexTaskIds'>>): void;
   getAppState(key: string): Promise<string | undefined>;
   setAppState(key: string, value: string): Promise<void>;
@@ -548,6 +550,12 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
     WHERE tenant_id = ? AND id = ?
   `);
 
+  // Atomik rezervasyon (CAS): yalnız 'draft' iken 'sent'e çevirir; çift onay penceresini önler.
+  const reserveCandidateStmt = db.prepare<[string, string, number]>(`
+    UPDATE group_candidates SET status = 'sent', updated_at = ?
+    WHERE tenant_id = ? AND id = ? AND status = 'draft'
+  `);
+
   return {
     async saveInbound(message: InboundMessage): Promise<void> {
       insert.run(
@@ -815,6 +823,10 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
 
     updateGroupCandidateStatus(tenantId: string, id: number, status: CandidateStatus): void {
       updateCandidateStatusStmt.run(status, new Date().toISOString(), tenantId, id);
+    },
+
+    tryReserveCandidateForApproval(tenantId: string, id: number): boolean {
+      return reserveCandidateStmt.run(new Date().toISOString(), tenantId, id).changes > 0;
     },
 
     updateGroupCandidate(tenantId: string, id: number, patch: Partial<Pick<GroupCandidate, 'summary' | 'tasks' | 'status' | 'approvalJobId' | 'perfexTaskIds'>>): void {
