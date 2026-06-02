@@ -1,6 +1,22 @@
 # SESSION_SUMMARY — murtaza-whatsapp-crm-bot
 
-Son güncelleme: 2026-05-31 (Faz 2 — Perfex açık görev/proje paneli; + WhatsApp Durum filtresi)
+Son güncelleme: 2026-06-02 (Faz 3 çekirdek — Opus extraction → aday panel; + mesaj düzenleme fix)
+
+## 2026-06-02 — Faz 3 çekirdek: Grup mesajından Opus ile aday özet/görev çıkarımı (Perfex YAZMA YOK)
+
+On-demand akış (orkestratör + paralel ajan workflow): panel "🧠 Bu grubu özetle" → `POST /api/extract-group` → `scripts/wa-extract.py` (grup mesajlarını SQLite'tan **READ-ONLY** okur, prompt **stdin**'den Claude Opus'a, `{özet, aday görevler}` JSON) → `extraction-runner.ts` (execFile, throw etmez) → `index.ts` CRM eşlemesini çözer + sha256 hash → `group_candidates` tablosuna `draft` yazar → `GET /api/candidates` panelde özet+görevler.
+
+- **Yeni:** `src/candidate/extraction-runner.ts`, `scripts/wa-extract.py`, `group_candidates` tablosu + 5 store metodu (insert/list/get/updateStatus/update, dedup UNIQUE(tenant,chat,hash)), GroupCandidate/CandidateTask tipleri, config `waExtractScript`.
+- **Güvenlik (review sonrası):** prompt `-p` arg yerine **stdin** (PII process args'ta görünmez — HIGH fix), grup mesajlarına prompt-injection **sınır marker + nötralizasyon** (MEDIUM), `readJson` body limiti (MEDIUM), candidate `ORDER BY ..., id DESC`, insert null-assert → açık hata.
+- **Kalite:** 5-ajan workflow (temel∥ + entegrasyon + test∥review). tsc temiz, **141 test** (123→141). Adversarial review: 1 HIGH + 2 MEDIUM + 2 LOW hepsi düzeltildi, 0 kalan.
+- **Canlı doğrulama:** wa-extract.py gerçek Opus → Atölye Bambini grubu (26 mesaj) → doğru özet + 5 isabetli görev. Restart sonrası uçtan uca: `POST /api/extract-group` → `candidateId:1`, `GET /api/candidates` → 1 aday/5 görev/draft. Commit `3a5d5f8`. +1 QR'sız resume.
+- **Not:** group_candidates'te `client:None` çünkü grup henüz eşli değil (0 mapping). Faz 4 yazması için operatör grubu müşteriye eşlemeli.
+
+**Sıradaki — Faz 4:** aday → Telegram 3-buton onay (`request_approval`) → onayda `resolve_approval._apply_action` yeni `perfex_task_create` case → Perfex'e görev YAZ (mevcut `perfex_recorder.py` escape'li yol, dedup hash marker, readback). İlk canlı yazma açık onayla. Gateway core edit YOK.
+
+## 2026-06-01 — WhatsApp mesaj düzenleme (edit) panelde gösterilir
+
+Baileys v7 MESSAGE_EDIT'i `messages.update` ile iletir (key.id=orijinal, update.message.editedMessage.message=yeni içerik). Handler sadece status okuyordu → edit düşüyordu. Fix: `parseMessageEdit` (saf, test edilebilir) → `store.updateMessageText` (yeni `edited_at` kolonu) → panelde "(düzenlendi)". Commit `508bdaf` + observability `7f9c439`. Not: restart-öncesi düzenlemeler kurtarılamaz (WhatsApp tekrar göndermez).
 
 ## 2026-05-31 — Faz 2: Eşli Müşterinin Perfex Açık Görev/Proje Durumu Panelde (read-only)
 
