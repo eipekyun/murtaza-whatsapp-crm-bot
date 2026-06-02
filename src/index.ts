@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { createHash } from 'node:crypto';
 import { rmSync, readdirSync, readFileSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { loadConfigFromEnv } from './config.js';
 import { createRouter } from './router.js';
 import { createSqliteMessageStore } from './store/sqlite-message-store.js';
@@ -306,7 +306,9 @@ async function main(): Promise<void> {
         tasks: payloadTasks,
         candidate_id: candidateId,
         tenant_id: config.tenantId,
-        bot_db_path: config.dbPath
+        // Mutlak path: Hermes resolve_approval farklı CWD'den çalışır; göreceli path yanlış
+        // konuma düşer (loop-closure prefix guard'ı da reddeder). resolve = bot CWD'den mutlak.
+        bot_db_path: resolve(config.dbPath)
       };
 
       const titleStr = `Perfex görev onayı (${payloadTasks.length})`;
