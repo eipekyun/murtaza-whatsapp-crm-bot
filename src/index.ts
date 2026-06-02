@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { createHash } from 'node:crypto';
 import { rmSync, readdirSync, readFileSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -9,10 +10,11 @@ import { createOperatorHttpServer, type GroupInfo, type MediaFile } from './http
 import { startBaileysClient, type BaileysClientOptions } from './whatsapp/baileys-client.js';
 import { createDrivePythonRunner, createMediaArchiver } from './media/media-archiver.js';
 import { createPerfexReader } from './perfex/perfex-reader.js';
+import { createExtractionRunner } from './candidate/extraction-runner.js';
 import { readCustomerCard } from './customer/customer-card-reader.js';
 import { parseGroupMappings, upsertGroupMapping } from './customer/vault-group-mapping.js';
 import { normalizePhone, normalizeWhitelist } from './phone.js';
-import type { ChatCrmMapping, MediaKind, PerfexQueryResult, ProjectOption } from './types.js';
+import type { ChatCrmMapping, GroupCandidate, MediaKind, PerfexQueryResult, ProjectOption } from './types.js';
 import type { WASocket } from '@whiskeysockets/baileys';
 
 async function main(): Promise<void> {
@@ -48,6 +50,12 @@ async function main(): Promise<void> {
     python: config.perfexQueryPython,
     scriptPath: config.perfexQueryScript,
     opsEnvPath: config.perfexOpsEnvPath
+  });
+  // Grup → görev adayı çıkarma köprüsü (scripts/wa-extract.py). extractGroup ASLA throw etmez.
+  const extractionRunner = createExtractionRunner({
+    python: config.perfexQueryPython,
+    scriptPath: config.waExtractScript,
+    dbPath: config.dbPath
   });
   // Restart recovery (2/2): bekleyen + başarısız tüm medyayı (firma vs inbox kararıyla) yeniden
   // kuyruğa al. enqueue arka planda seri çalışır; startup'ı bloklamaz.
@@ -204,6 +212,52 @@ async function main(): Promise<void> {
     } catch (error) {
       return { tasks: [], projects: [], error: error instanceof Error ? error.message : 'perfex erişilemedi' };
     }
+  }
+
+  // Panel 'Bu grubu özetle' butonu: grup mesajlarından wa-extract.py ile özet + görev adayı çıkarır,
+  // grup CRM eşlemesiyle zenginleştirip group_candidates'a (status:'draft') yazar. Hash ile dedup —
+  // aynı özet/görev seti tekrar üretilirse store mevcut adayı döner. extractionRunner throw etmez;
+  // yine de defansif try-catch (eşleme okuması / store yazımı patlayabilir).
+  async function extractGroup(chatId: string): Promise<{ ok: boolean; candidateId?: number; error?: string }> {
+    if (!chatId.endsWith('@g.us')) return { ok: false, error: 'sadece grup' };
+    try {
+      const result = await extractionRunner.extractGroup(chatId);
+      if (!result.ok) return { ok: false, error: result.error ?? 'extraction_failed' };
+      const summary = result.summary ?? '';
+      const tasks = result.tasks ?? [];
+
+      // Grup CRM eşlemesinden firma/proje bağlamını çöz (varsa). Eşleme yoksa alanlar undefined kalır.
+      const mapping = store.getGroupCrmMapping(config.tenantId, chatId);
+
+      // Dedup hash: chatId + özet + görev başlıkları. Aynı içerik → aynı hash → store mevcut adayı döner.
+      const hashInput = chatId + '|' + summary + '|' + tasks.map((t) => t.title).join('|');
+      const hash = createHash('sha256').update(hashInput).digest('hex').slice(0, 16);
+
+      // Tüm görevlerin kaynak mesaj id'lerinin uniq birleşimi → aday seviyesinde izlenebilirlik.
+      const sourceMessageIds = [...new Set(tasks.flatMap((t) => t.sourceMessageIds))];
+
+      const candidate = store.insertGroupCandidate({
+        tenantId: config.tenantId,
+        chatId,
+        ...(mapping?.customerSlug ? { customerSlug: mapping.customerSlug } : {}),
+        ...(mapping?.perfexClientId !== undefined ? { perfexClientId: mapping.perfexClientId } : {}),
+        ...(mapping?.perfexProjectId !== undefined ? { perfexProjectId: mapping.perfexProjectId } : {}),
+        summary,
+        tasks,
+        status: 'draft',
+        sourceMessageIds,
+        extractionSource: 'claude-opus',
+        hash,
+        perfexTaskIds: []
+      });
+      return { ok: true, candidateId: candidate.id };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'aday çıkarılamadı' };
+    }
+  }
+
+  function listCandidates(chatId: string): GroupCandidate[] {
+    return store.listGroupCandidates(config.tenantId, chatId);
   }
 
   // Operatör panelden firma/proje değiştirince chat_crm_mapping mirror'ını tazeler ve
@@ -380,6 +434,8 @@ async function main(): Promise<void> {
     onCustomerAssigned: (chatId, slug) => mediaArchiver.onCustomerAssigned(chatId, slug),
     onConversationCrmChanged: (chatId) => onConversationCrmChanged(chatId),
     getPerfexTasks: (chatId) => getPerfexTasks(chatId),
+    extractGroup: (chatId) => extractGroup(chatId),
+    listCandidates: async (chatId) => listCandidates(chatId),
     getMediaFile: (messageId) => resolveMediaFile(messageId),
     getGroupInfo: (chatId) => resolveGroupInfo(chatId),
     getAutoReplyAudience: () => autoReplyAudience,

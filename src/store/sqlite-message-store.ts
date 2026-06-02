@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
-import type { ChatCrmMapping, ConversationSettings, ConversationSummary, InboundMessage, MediaUploadStatus, OutboundMessage, ReadReceiptMode, StoredMessage } from '../types.js';
+import type { CandidateStatus, CandidateTask, ChatCrmMapping, ConversationSettings, ConversationSummary, GroupCandidate, InboundMessage, MediaUploadStatus, NewGroupCandidate, OutboundMessage, ReadReceiptMode, StoredMessage } from '../types.js';
 import { normalizePhone, normalizeWhitelist } from '../phone.js';
 import { normalizeSlug } from '../customer/slug.js';
 
@@ -71,6 +71,27 @@ interface ChatCrmMappingRow {
   updated_at: string;
 }
 
+interface GroupCandidateRow {
+  id: number;
+  tenant_id: string;
+  chat_id: string;
+  customer_slug: string | null;
+  perfex_client_id: number | null;
+  perfex_project_id: number | null;
+  summary: string;
+  tasks_json: string;
+  status: string;
+  source_message_ids: string;
+  extraction_source: string | null;
+  window_start: string | null;
+  window_end: string | null;
+  hash: string;
+  approval_job_id: string | null;
+  perfex_task_ids: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface MessageStore {
   saveInbound(message: InboundMessage): Promise<void>;
   saveOutbound(message: OutboundMessage): Promise<void>;
@@ -103,6 +124,12 @@ export interface MessageStore {
   setGroupCrmMapping(mapping: ChatCrmMapping): void;
   listGroupCrmMappings(tenantId: string): ChatCrmMapping[];
   deleteGroupCrmMapping(tenantId: string, chatId: string): void;
+  // Grup mesajlarından çıkarılan görev adayları (group_candidates tablosu).
+  insertGroupCandidate(c: NewGroupCandidate): GroupCandidate;
+  listGroupCandidates(tenantId: string, chatId: string): GroupCandidate[];
+  getGroupCandidate(tenantId: string, id: number): GroupCandidate | undefined;
+  updateGroupCandidateStatus(tenantId: string, id: number, status: CandidateStatus): void;
+  updateGroupCandidate(tenantId: string, id: number, patch: Partial<Pick<GroupCandidate, 'summary' | 'tasks' | 'status' | 'approvalJobId' | 'perfexTaskIds'>>): void;
   getAppState(key: string): Promise<string | undefined>;
   setAppState(key: string, value: string): Promise<void>;
   close(): void;
@@ -166,6 +193,31 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
       updated_at TEXT NOT NULL,
       PRIMARY KEY (tenant_id, chat_id)
     );
+
+    CREATE TABLE IF NOT EXISTS group_candidates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      customer_slug TEXT,
+      perfex_client_id INTEGER,
+      perfex_project_id INTEGER,
+      summary TEXT NOT NULL,
+      tasks_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      source_message_ids TEXT NOT NULL,
+      extraction_source TEXT,
+      window_start TEXT,
+      window_end TEXT,
+      hash TEXT NOT NULL,
+      approval_job_id TEXT,
+      perfex_task_ids TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(tenant_id, chat_id, hash)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_group_candidates_chat
+      ON group_candidates(tenant_id, chat_id, created_at DESC);
   `);
   ensureColumn(db, 'messages', 'origin', 'TEXT');
   ensureColumn(db, 'messages', 'media_kind', 'TEXT');
@@ -454,6 +506,48 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
     WHERE tenant_id = ? AND chat_id = ?
   `);
 
+  const candidateColumns = `
+    SELECT id, tenant_id, chat_id, customer_slug, perfex_client_id, perfex_project_id,
+           summary, tasks_json, status, source_message_ids, extraction_source,
+           window_start, window_end, hash, approval_job_id, perfex_task_ids,
+           created_at, updated_at
+    FROM group_candidates
+  `;
+
+  const getCandidateByHashStmt = db.prepare<[string, string, string], GroupCandidateRow>(`
+    ${candidateColumns}
+    WHERE tenant_id = ? AND chat_id = ? AND hash = ?
+    LIMIT 1
+  `);
+  const getCandidateByHashReader = getCandidateByHashStmt as unknown as { get: (t: string, c: string, h: string) => GroupCandidateRow | undefined };
+
+  const insertCandidateStmt = db.prepare<[string, string, string | null, number | null, number | null, string, string, string, string, string | null, string | null, string | null, string, string | null, string, string, string]>(`
+    INSERT INTO group_candidates (
+      tenant_id, chat_id, customer_slug, perfex_client_id, perfex_project_id,
+      summary, tasks_json, status, source_message_ids, extraction_source,
+      window_start, window_end, hash, approval_job_id, perfex_task_ids,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const getCandidateByIdStmt = db.prepare<[string, number], GroupCandidateRow>(`
+    ${candidateColumns}
+    WHERE tenant_id = ? AND id = ?
+    LIMIT 1
+  `);
+  const getCandidateByIdReader = getCandidateByIdStmt as unknown as { get: (t: string, id: number) => GroupCandidateRow | undefined };
+
+  const listCandidatesStmt = db.prepare<[string, string], GroupCandidateRow>(`
+    ${candidateColumns}
+    WHERE tenant_id = ? AND chat_id = ?
+    ORDER BY created_at DESC, id DESC
+  `);
+
+  const updateCandidateStatusStmt = db.prepare<[string, string, string, number]>(`
+    UPDATE group_candidates SET status = ?, updated_at = ?
+    WHERE tenant_id = ? AND id = ?
+  `);
+
   return {
     async saveInbound(message: InboundMessage): Promise<void> {
       insert.run(
@@ -679,6 +773,80 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
       deleteCrmMappingStmt.run(tenantId, chatId);
     },
 
+    insertGroupCandidate(c: NewGroupCandidate): GroupCandidate {
+      // Dedup: aynı (tenant, chat, hash) varsa mevcudu döndür, yeniden ekleme.
+      const existing = getCandidateByHashReader.get(c.tenantId, c.chatId, c.hash);
+      if (existing) return rowToGroupCandidate(existing);
+      const now = new Date().toISOString();
+      const result = insertCandidateStmt.run(
+        c.tenantId,
+        c.chatId,
+        c.customerSlug ? normalizeSlug(c.customerSlug) : null,
+        c.perfexClientId ?? null,
+        c.perfexProjectId ?? null,
+        c.summary,
+        JSON.stringify(c.tasks ?? []),
+        c.status,
+        JSON.stringify(c.sourceMessageIds ?? []),
+        c.extractionSource ?? null,
+        c.windowStart ?? null,
+        c.windowEnd ?? null,
+        c.hash,
+        c.approvalJobId ?? null,
+        JSON.stringify(c.perfexTaskIds ?? []),
+        now,
+        now
+      );
+      // INSERT başarılı → row her zaman var; emniyet için hash fallback, o da yoksa açık hata.
+      const row = getCandidateByIdReader.get(c.tenantId, Number(result.lastInsertRowid))
+        ?? getCandidateByHashReader.get(c.tenantId, c.chatId, c.hash);
+      if (!row) throw new Error('group_candidate_insert_lost');
+      return rowToGroupCandidate(row);
+    },
+
+    listGroupCandidates(tenantId: string, chatId: string): GroupCandidate[] {
+      return listCandidatesStmt.all(tenantId, chatId).map(rowToGroupCandidate);
+    },
+
+    getGroupCandidate(tenantId: string, id: number): GroupCandidate | undefined {
+      const row = getCandidateByIdReader.get(tenantId, id);
+      return row ? rowToGroupCandidate(row) : undefined;
+    },
+
+    updateGroupCandidateStatus(tenantId: string, id: number, status: CandidateStatus): void {
+      updateCandidateStatusStmt.run(status, new Date().toISOString(), tenantId, id);
+    },
+
+    updateGroupCandidate(tenantId: string, id: number, patch: Partial<Pick<GroupCandidate, 'summary' | 'tasks' | 'status' | 'approvalJobId' | 'perfexTaskIds'>>): void {
+      const sets: string[] = [];
+      const params: Array<string | null> = [];
+      if (patch.summary !== undefined) {
+        sets.push('summary = ?');
+        params.push(patch.summary);
+      }
+      if (patch.tasks !== undefined) {
+        sets.push('tasks_json = ?');
+        params.push(JSON.stringify(patch.tasks));
+      }
+      if (patch.status !== undefined) {
+        sets.push('status = ?');
+        params.push(patch.status);
+      }
+      if (patch.approvalJobId !== undefined) {
+        sets.push('approval_job_id = ?');
+        params.push(patch.approvalJobId);
+      }
+      if (patch.perfexTaskIds !== undefined) {
+        sets.push('perfex_task_ids = ?');
+        params.push(JSON.stringify(patch.perfexTaskIds));
+      }
+      if (sets.length === 0) return;
+      sets.push('updated_at = ?');
+      params.push(new Date().toISOString());
+      db.prepare(`UPDATE group_candidates SET ${sets.join(', ')} WHERE tenant_id = ? AND id = ?`)
+        .run(...params, tenantId, id);
+    },
+
     async getAppState(key: string): Promise<string | undefined> {
       return (getState as unknown as { get: (key: string) => { value: string } | undefined }).get(key)?.value;
     },
@@ -733,6 +901,44 @@ function rowToChatCrmMapping(row: ChatCrmMappingRow): ChatCrmMapping {
     repoPath: row.repo_path ?? undefined,
     updatedAt: row.updated_at
   };
+}
+
+function rowToGroupCandidate(row: GroupCandidateRow): GroupCandidate {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    chatId: row.chat_id,
+    customerSlug: row.customer_slug ?? undefined,
+    perfexClientId: row.perfex_client_id ?? undefined,
+    perfexProjectId: row.perfex_project_id ?? undefined,
+    summary: row.summary,
+    tasks: parseJsonArray<CandidateTask>(row.tasks_json),
+    status: normalizeCandidateStatus(row.status),
+    sourceMessageIds: parseJsonArray<string>(row.source_message_ids),
+    extractionSource: row.extraction_source ?? '',
+    windowStart: row.window_start ?? undefined,
+    windowEnd: row.window_end ?? undefined,
+    hash: row.hash,
+    approvalJobId: row.approval_job_id ?? undefined,
+    perfexTaskIds: parseJsonArray<number>(row.perfex_task_ids),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function parseJsonArray<T>(value: string | null): T[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? (parsed as T[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeCandidateStatus(value: string): CandidateStatus {
+  if (value === 'draft' || value === 'sent' || value === 'approved' || value === 'written' || value === 'discarded') return value;
+  return 'draft';
 }
 
 function normalizeUploadStatus(value: string | null): MediaUploadStatus | undefined {

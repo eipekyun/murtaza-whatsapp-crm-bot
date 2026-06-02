@@ -25,7 +25,8 @@ const config: RuntimeConfig = {
   groupMapPath: './02-Temel/WhatsApp-Grup-Eslemesi.md',
   perfexQueryPython: '/usr/bin/python3',
   perfexQueryScript: './scripts/perfex-query.py',
-  perfexOpsEnvPath: '/home/murtaza/.config/murtaza-vps-ops.env'
+  perfexOpsEnvPath: '/home/murtaza/.config/murtaza-vps-ops.env',
+  waExtractScript: './scripts/wa-extract.py'
 };
 
 describe('baileys inbound message mapping', () => {

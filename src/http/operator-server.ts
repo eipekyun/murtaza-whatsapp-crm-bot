@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { createReadStream, readFileSync, rmSync } from 'node:fs';
 import type { MessageStore } from '../store/sqlite-message-store.js';
-import type { PerfexQueryResult, ProjectOption } from '../types.js';
+import type { GroupCandidate, PerfexQueryResult, ProjectOption } from '../types.js';
 import { normalizePhone } from '../phone.js';
 
 export interface WhatsAppSendPayload {
@@ -66,6 +66,11 @@ export interface OperatorServerOptions {
   // Sohbete atanmış Perfex firmasının READ-ONLY görev/proje durumu (on-demand panel butonu).
   // Wiring (Dalga 3) chatId → perfexClientId çözümünü + PerfexReader çağrısını burada bağlar.
   getPerfexTasks?: (chatId: string) => Promise<PerfexQueryResult>;
+  // Grup sohbetini özetle → görev adayı (group_candidates) üret (on-demand panel butonu).
+  // Sadece @g.us grupları için anlamlı; wa-extract.py köprüsünü index bağlar.
+  extractGroup?: (chatId: string) => Promise<{ ok: boolean; candidateId?: number; error?: string }>;
+  // Bir grubun kayıtlı görev adaylarını (created_at DESC) döner.
+  listCandidates?: (chatId: string) => Promise<GroupCandidate[]>;
 }
 
 export function createOperatorHttpServer(options: OperatorServerOptions): Server {
@@ -160,6 +165,23 @@ export function createOperatorHttpServer(options: OperatorServerOptions): Server
           ? await options.getPerfexTasks(chatId)
           : { tasks: [], projects: [], error: 'perfex devre dışı' };
         return sendJson(res, result);
+      }
+      if (req.method === 'POST' && parsed.pathname === '/api/extract-group') {
+        const body = await readJson(req);
+        const chatId = String(body.chatId ?? '').trim();
+        if (!chatId) return sendJson(res, { error: 'chatId_required' }, 400);
+        // Görev adayı çıkarımı yalnız grup sohbetlerinde anlamlı (çoklu kişi → operasyon konuşması).
+        if (!chatId.endsWith('@g.us')) return sendJson(res, { error: 'sadece grup' }, 400);
+        const result = options.extractGroup
+          ? await options.extractGroup(chatId)
+          : { ok: false, error: 'aday çıkarımı devre dışı' };
+        return sendJson(res, result);
+      }
+      if (req.method === 'GET' && parsed.pathname === '/api/candidates') {
+        const chatId = parsed.searchParams.get('chatId');
+        if (!chatId) return sendJson(res, { error: 'chatId_required' }, 400);
+        const candidates = options.listCandidates ? await options.listCandidates(chatId) : [];
+        return sendJson(res, { candidates });
       }
       if (req.method === 'GET' && parsed.pathname === '/api/group-info') {
         const chatId = parsed.searchParams.get('chatId');
@@ -285,9 +307,15 @@ function isAuthorized(req: IncomingMessage, expected: string, parsed?: URL): boo
   return timingSafeEqual(a, b);
 }
 
-async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+async function readJson(req: IncomingMessage, maxBytes = 1_048_576): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  let total = 0;
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buf.byteLength;
+    if (total > maxBytes) throw new Error('request_too_large');
+    chunks.push(buf);
+  }
   if (chunks.length === 0) return {};
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
 }
@@ -579,6 +607,15 @@ body{margin:0;background:var(--bg);color:var(--text)}
         <div id="perfexTasksList" style="margin-top:8px"></div>
       </div>
 
+      <div class="card" id="candidateCard" style="display:none">
+        <h3>🧠 Aday özet/görevler</h3>
+        <p class="sub">Grup konuşmasını özetler ve görev adaylarını çıkarır. LLM çağırdığı için birkaç saniye sürebilir.</p>
+        <button id="extractGroup" class="btn primary" style="margin-top:6px">Bu grubu özetle</button>
+        <div class="sub" id="candidateStatus" style="margin-top:8px"></div>
+        <div id="candidateSummary" style="margin-top:8px;font-size:13px"></div>
+        <div id="candidateTasks" style="margin-top:8px"></div>
+      </div>
+
       <div class="card">
         <h3>Otomatik cevap kapsamı</h3>
         <div class="row">
@@ -832,6 +869,86 @@ body{margin:0;background:var(--bg);color:var(--text)}
     $('perfexTasksList').innerHTML = '';
   }
 
+  // Aday özet/görev kartı yalnız grup sohbetinde görünür; başka sohbete geçince gizlenir/temizlenir.
+  function resetCandidates(){
+    var isGroup = (selectedChatId || '').slice(-5) === '@g.us';
+    $('candidateCard').style.display = isGroup ? 'block' : 'none';
+    $('candidateStatus').textContent = '';
+    $('candidateSummary').textContent = '';
+    $('candidateTasks').innerHTML = '';
+  }
+
+  // En yeni adayın özet + görevlerini render eder (Perfex görev listesi stiliyle aynı).
+  function renderCandidate(c){
+    var summaryEl = $('candidateSummary');
+    var tasksEl = $('candidateTasks');
+    summaryEl.textContent = '';
+    tasksEl.innerHTML = '';
+    if (!c) { $('candidateStatus').textContent = 'Henüz aday yok.'; return; }
+    summaryEl.textContent = c.summary || '';
+    var tasks = c.tasks || [];
+    $('candidateStatus').textContent = tasks.length + ' görev adayı · ' + (c.status || 'draft');
+    tasks.forEach(function(t){
+      var row = document.createElement('div'); row.className = 'taskRow';
+      var main = document.createElement('div'); main.className = 'taskMain';
+      var name = document.createElement('div'); name.className = 'taskName';
+      name.textContent = t.title || '';
+      main.appendChild(name);
+      if (t.description) {
+        var desc = document.createElement('div'); desc.className = 'taskStatus';
+        desc.textContent = t.description;
+        main.appendChild(desc);
+      }
+      row.appendChild(main);
+      var prio = document.createElement('span');
+      var prioClass = (t.priority >= 1 && t.priority <= 4) ? t.priority : 2;
+      prio.className = 'prioBadge prio-' + prioClass;
+      prio.textContent = priorityLabel(t.priority);
+      row.appendChild(prio);
+      tasksEl.appendChild(row);
+    });
+  }
+
+  // En yeni kayıtlı adayı çeker (varsa) ve render eder. Buton akışından sonra ve sohbet açılışında çağrılabilir.
+  async function loadCandidates(){
+    if (!selectedChatId) return;
+    var data;
+    try {
+      data = await api('/api/candidates?chatId=' + encodeURIComponent(selectedChatId));
+    } catch (err) {
+      $('candidateStatus').textContent = 'Adaylar alınamadı: ' + err.message;
+      return;
+    }
+    var candidates = data.candidates || [];
+    renderCandidate(candidates[0]);
+  }
+
+  // ON-DEMAND: operatör "Bu grubu özetle" butonuna basınca grup wa-extract.py ile özetlenir,
+  // en yeni aday geri çekilip render edilir. LLM çağrısı yaptığı için saniyeler sürebilir.
+  async function extractGroup(){
+    if (!selectedChatId) { alert('Önce konuşma seç'); return; }
+    if ((selectedChatId || '').slice(-5) !== '@g.us') { alert('Sadece grup sohbetleri özetlenebilir'); return; }
+    var btn = $('extractGroup');
+    var status = $('candidateStatus');
+    btn.disabled = true;
+    status.textContent = 'Özetleniyor… (LLM çağrısı, birkaç saniye)';
+    var data;
+    try {
+      data = await api('/api/extract-group', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: selectedChatId }) });
+    } catch (err) {
+      status.textContent = 'Özetleme hatası: ' + err.message;
+      btn.disabled = false;
+      return;
+    }
+    btn.disabled = false;
+    if (!data.ok) {
+      status.textContent = 'Özetleme başarısız: ' + (data.error || 'bilinmeyen hata');
+      return;
+    }
+    status.textContent = 'Özet hazır, yükleniyor…';
+    await loadCandidates();
+  }
+
   async function openMedia(messageId, disposition){
     var token = sessionStorage.getItem('operatorToken') || '';
     var headers = new Headers();
@@ -946,6 +1063,8 @@ body{margin:0;background:var(--bg);color:var(--text)}
           $('chatSub').innerHTML = '<span class="statusDot"></span> ' + (conv.phone || conv.chatId);
           try { await api('/api/mark-read', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chatId: conv.chatId }) }); } catch(e){}
           resetPerfexTasks();
+          resetCandidates();
+          loadCandidates();
           loadMessages(true);
           loadConversationSettings();
           loadConversations();
@@ -1335,6 +1454,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
   };
 
   $('loadPerfexTasks').onclick = loadPerfexTasks;
+  $('extractGroup').onclick = extractGroup;
 
   $('mediaOpenBtn').onclick = function(){ closeMediaMenu(); if (window.__mediaMenuId) openMedia(window.__mediaMenuId, 'inline'); };
   $('mediaDownloadBtn').onclick = function(){ closeMediaMenu(); if (window.__mediaMenuId) openMedia(window.__mediaMenuId, 'attachment'); };

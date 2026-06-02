@@ -76,6 +76,39 @@ export interface ChatCrmMapping {
   updatedAt: string;
 }
 
+export type CandidateStatus = 'draft' | 'sent' | 'approved' | 'written' | 'discarded';
+
+export interface CandidateTask {
+  title: string;
+  description: string;
+  priority: number;            // 1-4 (Perfex priority), default 2
+  suggestedDue?: string;       // ISO tarih veya undefined
+  sourceMessageIds: string[];
+}
+
+export interface GroupCandidate {
+  id: number;
+  tenantId: string;
+  chatId: string;              // @g.us grup
+  customerSlug?: string;
+  perfexClientId?: number;
+  perfexProjectId?: number;
+  summary: string;
+  tasks: CandidateTask[];
+  status: CandidateStatus;
+  sourceMessageIds: string[];
+  extractionSource: string;
+  windowStart?: string;
+  windowEnd?: string;
+  hash: string;
+  approvalJobId?: string;      // Faz 4 alanı
+  perfexTaskIds: number[];     // Faz 4 alanı
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type NewGroupCandidate = Omit<GroupCandidate, 'id' | 'createdAt' | 'updatedAt'>;
+
 export interface CustomerCardInfo {
   slug: string;
   name: string;
