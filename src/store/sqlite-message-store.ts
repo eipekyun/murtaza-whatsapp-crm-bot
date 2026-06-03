@@ -131,6 +131,9 @@ export interface MessageStore {
   updateGroupCandidateStatus(tenantId: string, id: number, status: CandidateStatus): void;
   // Atomik rezervasyon: yalnız 'draft' iken 'sent'e çevirir (CAS); başarılıysa true. Çift onayı önler.
   tryReserveCandidateForApproval(tenantId: string, id: number): boolean;
+  // Yeni aday üretilince aynı grubun eski 'draft' adaylarını 'discarded' yapar (exceptId hariç).
+  // Grup başına tek güncel taslak kalsın. Etkilenen satır sayısını döner.
+  discardDraftCandidates(tenantId: string, chatId: string, exceptId: number): number;
   updateGroupCandidate(tenantId: string, id: number, patch: Partial<Pick<GroupCandidate, 'summary' | 'tasks' | 'status' | 'approvalJobId' | 'perfexTaskIds'>>): void;
   getAppState(key: string): Promise<string | undefined>;
   setAppState(key: string, value: string): Promise<void>;
@@ -556,6 +559,13 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
     WHERE tenant_id = ? AND id = ? AND status = 'draft'
   `);
 
+  // Supersede: aynı grubun (tenant, chat) eski 'draft' adaylarını 'discarded' yapar; exceptId
+  // (yeni üretilen aday) korunur. Grup başına tek güncel taslak kalsın.
+  const discardDraftCandidatesStmt = db.prepare<[string, string, string, number]>(`
+    UPDATE group_candidates SET status = 'discarded', updated_at = ?
+    WHERE tenant_id = ? AND chat_id = ? AND status = 'draft' AND id != ?
+  `);
+
   return {
     async saveInbound(message: InboundMessage): Promise<void> {
       insert.run(
@@ -827,6 +837,10 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
 
     tryReserveCandidateForApproval(tenantId: string, id: number): boolean {
       return reserveCandidateStmt.run(new Date().toISOString(), tenantId, id).changes > 0;
+    },
+
+    discardDraftCandidates(tenantId: string, chatId: string, exceptId: number): number {
+      return discardDraftCandidatesStmt.run(new Date().toISOString(), tenantId, chatId, exceptId).changes;
     },
 
     updateGroupCandidate(tenantId: string, id: number, patch: Partial<Pick<GroupCandidate, 'summary' | 'tasks' | 'status' | 'approvalJobId' | 'perfexTaskIds'>>): void {

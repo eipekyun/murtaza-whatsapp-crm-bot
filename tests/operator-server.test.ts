@@ -76,6 +76,7 @@ function fakeStore(saved: OutboundMessage[] = [], opts: FakeStoreOptions = {}): 
     getGroupCandidate: () => undefined,
     updateGroupCandidateStatus: () => {},
     tryReserveCandidateForApproval: () => true,
+    discardDraftCandidates: () => 0,
     updateGroupCandidate: () => {},
     close: () => {}
   };

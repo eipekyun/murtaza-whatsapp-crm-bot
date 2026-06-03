@@ -256,6 +256,9 @@ async function main(): Promise<void> {
         hash,
         perfexTaskIds: []
       });
+      // Supersede: yeni aday üretildi → aynı grubun eski 'draft' adaylarını 'discarded' yap
+      // (yeni aday hariç). Grup başına tek güncel taslak kalsın.
+      store.discardDraftCandidates(config.tenantId, chatId, candidate.id);
       return { ok: true, candidateId: candidate.id };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : 'aday çıkarılamadı' };

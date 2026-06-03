@@ -202,4 +202,38 @@ describe('group_candidates CRUD', () => {
 
     expect(inserted.customerSlug).toBe('lavanda-lavander');
   });
+
+  it('discardDraftCandidates supersedes old drafts in the same chat, keeps exceptId draft', () => {
+    const first = store.insertGroupCandidate(candidate({ hash: 'draft-1' }));
+    const second = store.insertGroupCandidate(candidate({ hash: 'draft-2' }));
+
+    // Yeni aday (second) hariç eski draft (first) discard edilir.
+    const changed = store.discardDraftCandidates('esmark-test', '120363000000000000@g.us', second.id);
+    expect(changed).toBe(1);
+
+    const all = store.listGroupCandidates('esmark-test', '120363000000000000@g.us');
+    const byId = new Map(all.map((c) => [c.id, c]));
+    expect(byId.get(first.id)?.status).toBe('discarded');
+    expect(byId.get(second.id)?.status).toBe('draft');
+  });
+
+  it('discardDraftCandidates only touches draft status and is scoped per chat/tenant', () => {
+    // Aynı grupta: bir draft + bir sent (sent dokunulmamalı).
+    const draftA = store.insertGroupCandidate(candidate({ hash: 'a-draft' }));
+    const sentA = store.insertGroupCandidate(candidate({ hash: 'a-sent' }));
+    store.updateGroupCandidateStatus('esmark-test', sentA.id, 'sent');
+
+    // Başka grup ve başka tenant draft'ları etkilenmemeli.
+    const otherChat = store.insertGroupCandidate(candidate({ chatId: 'b@g.us', hash: 'b-draft' }));
+    const otherTenant = store.insertGroupCandidate(candidate({ tenantId: 'other', hash: 'other-draft' }));
+
+    // exceptId hiçbir mevcut id ile çakışmasın (0) → gruptaki tüm draft'lar süpürülür.
+    const changed = store.discardDraftCandidates('esmark-test', '120363000000000000@g.us', 0);
+    expect(changed).toBe(1); // yalnız draftA
+
+    expect(store.getGroupCandidate('esmark-test', draftA.id)?.status).toBe('discarded');
+    expect(store.getGroupCandidate('esmark-test', sentA.id)?.status).toBe('sent');
+    expect(store.getGroupCandidate('esmark-test', otherChat.id)?.status).toBe('draft');
+    expect(store.getGroupCandidate('other', otherTenant.id)?.status).toBe('draft');
+  });
 });
