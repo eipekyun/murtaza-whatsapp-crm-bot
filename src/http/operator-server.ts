@@ -904,7 +904,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
     if (s === 'draft') return 'Taslak';
     if (s === 'sent') return 'Onaya gönderildi';
     if (s === 'approved') return 'Onaylandı';
-    if (s === 'written') return 'Perfex\'e yazıldı';
+    if (s === 'written') return "Perfex'e yazıldı";
     if (s === 'discarded') return 'İptal';
     return s || 'Taslak';
   }
@@ -982,7 +982,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
       if (btn) btn.disabled = false;
       return;
     }
-    status.textContent = 'Onaya gönderildi ✓ (Telegram\'dan onayla)';
+    status.textContent = "Onaya gönderildi ✓ (Telegram'dan onayla)";
     await loadCandidates();
   }
 
