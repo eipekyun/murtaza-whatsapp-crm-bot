@@ -1,6 +1,18 @@
 # SESSION_SUMMARY — murtaza-whatsapp-crm-bot
 
-Son güncelleme: 2026-06-02 (Faz 4 — aday → onay → Perfex'e görev YAZMA; ilk canlı yazma doğrulandı)
+Son güncelleme: 2026-06-04 (Zamanlanmış cron — eşli grupları periyodik özetler; uçtan uca doğrulandı)
+
+## 2026-06-04 — Zamanlanmış cron: eşli grupları periyodik özetle (Faz 3 sessiz-dinleyici)
+
+Hermes cron job `d5b8d51e352b` "WA grup aday özetleme", schedule `0 6,12,18 * * *` (09/15/21 TR), `scripts/wa-group-extract.py` (Hermes-side), no-agent + deliver=telegram.
+
+- **Akış:** cron → `wa-group-extract.py` (bot SQLite'tan READ-ONLY eşli grupları + son inbound zamanını okur; state dosyası ile sadece-yeni-mesaj olanları seçer) → her biri için bot `/api/extract-group` POST (operator token, urllib) → Opus özet/aday → `group_candidates` draft → **supersede** (yeni özet üretilince aynı grubun eski draft'ları 'discarded', sent/written korunur — grup başına tek güncel taslak) → yeni aday varsa stdout Türkçe bildirim → deliver=telegram Ersin'e.
+- **Bot:** `discardDraftCandidates(tenant, chat, exceptId)` + extractGroup supersede. Commit `6b5c60d`. 146 test, tsc temiz. Güvenlik review APPROVE (1 LOW path-hardcode, 1 INFO non-atomic, kabul edilebilir).
+- **Auth notu:** 2026-06-03 org Claude Code abonelik erişimini kapatmıştı → tüm `claude -p` (extraction + Hermes claude-dispatch) bloklandı. 2026-06-04 Ersin Console'dan re-enable etti → çalışır. ANTHROPIC_API_KEY yok; abonelik yolu kullanılıyor.
+- **CANLI DOĞRULANDI:** `hermes cron run` → 2 eşli grup (Atölye Bambini #3/6 görev + Voyelle #4/5 görev) özetlendi, supersede (#1 discarded), state güncellendi, Telegram bildirimi teslim edildi (last_delivery_error None, last_status ok).
+- **Not:** state sadece başarılı POST'ta ilerler; her run yeni-mesajsız grubu atlar (Opus tasarrufu). `wa-group-extract.py` `~/.hermes` altında (git değil) — Hermes update'inde korunmalı.
+
+
 
 ## 2026-06-02 — Faz 4: Aday → Telegram onay → Perfex'e görev yazma (CANLI DOĞRULANDI)
 
