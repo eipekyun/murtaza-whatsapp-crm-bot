@@ -1,0 +1,41 @@
+# MURTAZA WhatsApp CRM Bot — systemd system unit
+#
+# Amaç: bot reboot'a dayanıklı olsun. Önceden setsid-detached (parent=init)
+# çalışıyordu → her VPS reboot'unda kalıcı ölüyordu (2026-06-05 olayı).
+#
+# Kurulum (VPS, root):
+#   sudo cp deploy/murtaza-whatsapp-crm-bot.service /etc/systemd/system/
+#   sudo chmod 644 /etc/systemd/system/murtaza-whatsapp-crm-bot.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now murtaza-whatsapp-crm-bot
+#
+# Loglar: data/wa-bot.log (append) + journalctl -u murtaza-whatsapp-crm-bot
+# Not: WorkingDirectory ŞART — config script yollarını process.cwd()'den çözer,
+#      dotenv .env'i cwd'den okur, data/ göreceli.
+
+[Unit]
+Description=MURTAZA WhatsApp CRM Bot (Baileys + operator panel :8787)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=murtaza
+Group=murtaza
+WorkingDirectory=/home/murtaza/Workspace/MURTAZA/04-Projeler/murtaza-whatsapp-crm-bot
+Environment="HOME=/home/murtaza"
+Environment="USER=murtaza"
+Environment="LOGNAME=murtaza"
+Environment="PATH=/home/murtaza/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/usr/bin/node /home/murtaza/Workspace/MURTAZA/04-Projeler/murtaza-whatsapp-crm-bot/node_modules/tsx/dist/cli.mjs src/index.ts
+Restart=always
+RestartSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=append:/home/murtaza/Workspace/MURTAZA/04-Projeler/murtaza-whatsapp-crm-bot/data/wa-bot.log
+StandardError=append:/home/murtaza/Workspace/MURTAZA/04-Projeler/murtaza-whatsapp-crm-bot/data/wa-bot.log
+
+[Install]
+WantedBy=multi-user.target
