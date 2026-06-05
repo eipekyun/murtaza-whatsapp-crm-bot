@@ -68,7 +68,7 @@ export interface OperatorServerOptions {
   getPerfexTasks?: (chatId: string) => Promise<PerfexQueryResult>;
   // Grup sohbetini özetle → görev adayı (group_candidates) üret (on-demand panel butonu).
   // Sadece @g.us grupları için anlamlı; wa-extract.py köprüsünü index bağlar.
-  extractGroup?: (chatId: string) => Promise<{ ok: boolean; candidateId?: number; error?: string }>;
+  extractGroup?: (chatId: string) => Promise<{ ok: boolean; candidateId?: number; error?: string; note?: string; droppedCount?: number }>;
   // Bir grubun kayıtlı görev adaylarını (created_at DESC) döner.
   listCandidates?: (chatId: string) => Promise<GroupCandidate[]>;
   // Bir görev adayını onaya sunar: rel çözümü + per-task dedup_hash + on_approve payload kurup
@@ -541,6 +541,16 @@ body{margin:0;background:var(--bg);color:var(--text)}
 .cand-written{background:#1f4d3a;color:#7fe3b8}
 .candTaskIds{color:var(--muted);font-size:11px;margin-top:4px}
 .submitCandidateBtn{margin-top:10px}
+.candTabs{display:flex;gap:4px;border-bottom:1px solid var(--line)}
+.candTab{appearance:none;background:transparent;border:0;color:var(--muted);font:inherit;font-size:12px;font-weight:600;padding:7px 10px;cursor:pointer;border-bottom:2px solid transparent;display:flex;align-items:center;gap:6px}
+.candTab:hover{color:var(--text)}
+.candTab.active{color:var(--text);border-bottom-color:#00a884}
+.candTab .cnt{font-size:10px;background:#2a3942;color:#aebac1;border-radius:999px;padding:0 6px;min-width:16px;text-align:center;line-height:16px}
+.candTab.active .cnt{background:#00a884;color:#0b141a}
+.candBlock{border-top:1px solid var(--line);padding:10px 0}
+.candBlock:first-child{border-top:0}
+.candSummary{font-size:13px;margin:4px 0}
+.candEmpty{color:var(--muted);font-size:13px;padding:12px 0}
 
 @media(max-width:900px){.app{grid-template-columns:1fr}.right{display:none}.left{display:none}.msg{max-width:88%}}
 </style>
@@ -632,8 +642,8 @@ body{margin:0;background:var(--bg);color:var(--text)}
         <h3>🧠 Aday özet/görevler</h3>
         <p class="sub">Grup konuşmasını özetler ve görev adaylarını çıkarır. LLM çağırdığı için birkaç saniye sürebilir.</p>
         <button id="extractGroup" class="btn primary" style="margin-top:6px">Bu grubu özetle</button>
+        <div class="candTabs" id="candidateTabs" style="margin-top:10px"></div>
         <div class="sub" id="candidateStatus" style="margin-top:8px"></div>
-        <div id="candidateSummary" style="margin-top:8px;font-size:13px"></div>
         <div id="candidateTasks" style="margin-top:8px"></div>
       </div>
 
@@ -890,12 +900,23 @@ body{margin:0;background:var(--bg);color:var(--text)}
     $('perfexTasksList').innerHTML = '';
   }
 
+  // Aday sekme durumu: yüklenen tüm adaylar + aktif sekme (draft=Aktif, sent=Onayda, written=İşlendi).
+  var candidateList = [];
+  var activeCandTab = 'draft';
+  var CAND_TABS = [
+    { key: 'draft', label: 'Aktif' },
+    { key: 'sent', label: 'Onayda' },
+    { key: 'written', label: 'İşlendi' }
+  ];
+
   // Aday özet/görev kartı yalnız grup sohbetinde görünür; başka sohbete geçince gizlenir/temizlenir.
   function resetCandidates(){
     var isGroup = (selectedChatId || '').slice(-5) === '@g.us';
     $('candidateCard').style.display = isGroup ? 'block' : 'none';
+    candidateList = [];
+    activeCandTab = 'draft';
     $('candidateStatus').textContent = '';
-    $('candidateSummary').textContent = '';
+    $('candidateTabs').innerHTML = '';
     $('candidateTasks').innerHTML = '';
   }
 
@@ -909,30 +930,89 @@ body{margin:0;background:var(--bg);color:var(--text)}
     return s || 'Taslak';
   }
 
-  // En yeni adayın özet + görevlerini render eder (Perfex görev listesi stiliyle aynı).
-  // status badge (draft/sent/written) + perfex_task_ids varsa gösterir; draft ise "Onaya Sun" butonu.
-  function renderCandidate(c){
-    var summaryEl = $('candidateSummary');
+  // Aday status → sekme grubu. draft=Aktif, sent/approved=Onayda, written=İşlendi; discarded gizli.
+  function candGroupKey(s){
+    if (s === 'draft') return 'draft';
+    if (s === 'sent' || s === 'approved') return 'sent';
+    if (s === 'written') return 'written';
+    return null;
+  }
+
+  // candidateList'i status'e göre sekmelere böler, sekme barını (sayaçlı) + aktif sekmenin
+  // aday bloklarını çizer. İşleme alınan (sent/written) adaylar Aktif sekmeden ayrışır.
+  function renderCandidateTabs(){
+    var tabsEl = $('candidateTabs');
     var tasksEl = $('candidateTasks');
-    summaryEl.textContent = '';
+    var statusEl = $('candidateStatus');
+    tabsEl.innerHTML = '';
     tasksEl.innerHTML = '';
-    if (!c) { $('candidateStatus').textContent = 'Henüz aday yok.'; return; }
-    summaryEl.textContent = c.summary || '';
+    statusEl.textContent = '';
+
+    var groups = { draft: [], sent: [], written: [] };
+    candidateList.forEach(function(c){
+      var k = candGroupKey(c.status);
+      if (k) groups[k].push(c);
+    });
+
+    // Aktif sekme boşsa içi dolu ilk sekmeye düş (operatör boş ekran görmesin).
+    if (!groups[activeCandTab].length) {
+      for (var i = 0; i < CAND_TABS.length; i++) {
+        if (groups[CAND_TABS[i].key].length) { activeCandTab = CAND_TABS[i].key; break; }
+      }
+    }
+
+    CAND_TABS.forEach(function(tab){
+      var b = document.createElement('button');
+      b.className = 'candTab' + (tab.key === activeCandTab ? ' active' : '');
+      b.textContent = tab.label;
+      var cnt = document.createElement('span');
+      cnt.className = 'cnt';
+      cnt.textContent = groups[tab.key].length;
+      b.appendChild(cnt);
+      b.onclick = function(){ activeCandTab = tab.key; renderCandidateTabs(); };
+      tabsEl.appendChild(b);
+    });
+
+    var active = groups[activeCandTab] || [];
+    if (!active.length) {
+      var empty = document.createElement('div');
+      empty.className = 'candEmpty';
+      empty.textContent = candidateList.length ? 'Bu sekmede aday yok.' : 'Henüz aday yok.';
+      tasksEl.appendChild(empty);
+      return;
+    }
+    active.forEach(function(c){ tasksEl.appendChild(buildCandidateBlock(c)); });
+  }
+
+  // Tek adayı blok olarak kurar: status badge + özet + perfex id'leri + görev satırları.
+  // Yalnız 'draft' blokta "Onaya Sun" butonu (sent/written salt-okunur — zaten akışta/işlendi).
+  function buildCandidateBlock(c){
+    var block = document.createElement('div'); block.className = 'candBlock';
     var tasks = c.tasks || [];
     var status = c.status || 'draft';
-    var statusEl = $('candidateStatus');
-    statusEl.textContent = tasks.length + ' görev adayı · ';
+
+    var head = document.createElement('div'); head.className = 'sub';
+    head.textContent = tasks.length + ' görev adayı · ';
     var badge = document.createElement('span');
     badge.className = 'candStatusBadge cand-' + status;
     badge.textContent = candStatusLabel(status);
-    statusEl.appendChild(badge);
+    head.appendChild(badge);
+    block.appendChild(head);
+
+    if (c.summary) {
+      var sm = document.createElement('div'); sm.className = 'candSummary';
+      sm.textContent = c.summary;
+      block.appendChild(sm);
+    }
+
     var taskIds = c.perfexTaskIds || [];
     if (taskIds.length) {
       var idsEl = document.createElement('div');
       idsEl.className = 'candTaskIds';
       idsEl.textContent = 'Perfex görev: ' + taskIds.map(function(id){ return '#' + id; }).join(', ');
-      summaryEl.appendChild(idsEl);
+      block.appendChild(idsEl);
     }
+
     tasks.forEach(function(t){
       var row = document.createElement('div'); row.className = 'taskRow';
       var main = document.createElement('div'); main.className = 'taskMain';
@@ -950,16 +1030,17 @@ body{margin:0;background:var(--bg);color:var(--text)}
       prio.className = 'prioBadge prio-' + prioClass;
       prio.textContent = priorityLabel(t.priority);
       row.appendChild(prio);
-      tasksEl.appendChild(row);
+      block.appendChild(row);
     });
-    // Yalnız 'draft' adaylar onaya sunulabilir; sent/written zaten akışta.
+
     if (status === 'draft' && tasks.length) {
       var submitBtn = document.createElement('button');
       submitBtn.className = 'btn primary submitCandidateBtn';
       submitBtn.textContent = 'Onaya Sun';
       submitBtn.onclick = function(){ submitCandidate(c.id, submitBtn); };
-      tasksEl.appendChild(submitBtn);
+      block.appendChild(submitBtn);
     }
+    return block;
   }
 
   // "Onaya Sun" akışı: aday → /api/submit-candidate → Telegram 3-buton onayına gider.
@@ -986,7 +1067,7 @@ body{margin:0;background:var(--bg);color:var(--text)}
     await loadCandidates();
   }
 
-  // En yeni kayıtlı adayı çeker (varsa) ve render eder. Buton akışından sonra ve sohbet açılışında çağrılabilir.
+  // Grubun tüm adaylarını çeker ve sekmeli render eder. Buton akışından sonra ve sohbet açılışında çağrılabilir.
   async function loadCandidates(){
     if (!selectedChatId) return;
     var data;
@@ -996,8 +1077,8 @@ body{margin:0;background:var(--bg);color:var(--text)}
       $('candidateStatus').textContent = 'Adaylar alınamadı: ' + err.message;
       return;
     }
-    var candidates = data.candidates || [];
-    renderCandidate(candidates[0]);
+    candidateList = data.candidates || [];
+    renderCandidateTabs();
   }
 
   // ON-DEMAND: operatör "Bu grubu özetle" butonuna basınca grup wa-extract.py ile özetlenir,
@@ -1022,8 +1103,15 @@ body{margin:0;background:var(--bg);color:var(--text)}
       status.textContent = 'Özetleme başarısız: ' + (data.error || 'bilinmeyen hata');
       return;
     }
-    status.textContent = 'Özet hazır, yükleniyor…';
+    status.textContent = 'Yükleniyor…';
     await loadCandidates();
+    if (data.note === 'all_tasks_already_written') {
+      status.textContent = 'Yeni görev yok — çıkarılan görevler zaten işlenmiş.';
+    } else if (data.note === 'no_tasks') {
+      status.textContent = 'Bu grupta görev adayı bulunamadı.';
+    } else if (data.droppedCount) {
+      status.textContent = data.droppedCount + ' görev zaten işlenmişti, gizlendi.';
+    }
   }
 
   async function openMedia(messageId, disposition){
