@@ -1,6 +1,24 @@
 # SESSION_SUMMARY — murtaza-whatsapp-crm-bot
 
-Son güncelleme: 2026-06-05 (Dedup + panel 3 sekme + Onayda-fix + restart — CANLI)
+Son güncelleme: 2026-06-05 (systemd unit ile reboot persistence + çift-reboot RCA — CANLI)
+
+## 2026-06-05 (gece) — systemd unit: reboot persistence + çift-reboot kök sebep analizi
+
+Bot reboot sonrası ölü bulundu. Kök sebep: bot setsid-detached (parent=init) çalışıyordu, systemd/@reboot yoktu → VPS reboot'unda kalıcı öldü, kimse ayağa kaldırmadı.
+
+- **Fix — systemd system unit** (`deploy/murtaza-whatsapp-crm-bot.service`, kurulu `/etc/systemd/system/`): `Restart=always` (5sn), `enable` → `multi-user.target` ile boot'ta otomatik start. Hermes gateway unit pattern'i mirror edildi (User=murtaza, After=network-online). `ExecStart=/usr/bin/node node_modules/tsx/dist/cli.mjs src/index.ts`, `WorkingDirectory`=proje kökü (config script yolları cwd'den çözülür + dotenv), `StandardOutput=append:data/wa-bot.log`. Doğrulama: active+enabled, MainPID tek instance, WA QR'sız bağlandı (tenant=esmark-test), panel HTTP 200, port 8787.
+- **Geçiş:** manuel `tsx` process'i kapatıldı (`pkill -f` self-match tuzağı: komut satırında pattern string'i geçince kendi shell'ini öldürür — pid/spesifik pattern kullan), sonra systemd start. Çift WA consumer yok.
+
+### Çift-reboot RCA (2026-06-05 22:18 + 22:40)
+| Zaman | Olay | Kanıt |
+|------|------|------|
+| 3 Haz 06:38 | kernel 6.8.0-124 unattended-upgrade ile kuruldu (reboot bekliyordu) | dpkg.log (kesin) |
+| 5 Haz 22:16:25 | `sudo murtaza: systemctl reboot` → **Reboot #1** (kernel 117→124 aktive) | auth/journal (kesin) |
+| 5 Haz ~22:18 | 124'e boot → `/boot/efi` (UEFI) device-timeout → **emergency mode** | journal+syslog 22:18-22:42 boş (güçlü çıkarım, emergency log persist etmez) |
+| 5 Haz ~22:40 | recovery reboot → **Reboot #2** (current boot) | wtmp (kesin) |
+| 5 Haz 22:58:49 | `sed nofail,x-systemd.device-timeout=30 /etc/fstab` UEFI satırı → kalıcı fix | auth (kesin) |
+
+Sonuç: çift reboot = 1 kasıtlı (kernel aktive) + 1 recovery (ilk reboot'un açtığı UEFI mount-timeout emergency'sinden). fstab şimdi `/boot` + `/boot/efi` ikisinde de `nofail,x-systemd.device-timeout=30` → sonraki normal reboot'ta tekrarlamaz. fstab fix + bot systemd unit birlikte: sonraki reboot'ta bot otomatik döner.
 
 ## 2026-06-05 — Dedup + panel 3 sekme + Onayda-fix + restart (CANLI)
 
