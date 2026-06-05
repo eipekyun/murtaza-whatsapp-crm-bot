@@ -73,6 +73,7 @@ function fakeStore(saved: OutboundMessage[] = [], opts: FakeStoreOptions = {}): 
     deleteGroupCrmMapping: (_tenantId: string, chatId: string) => { crmMappings.delete(chatId); },
     insertGroupCandidate: () => { throw new Error('not implemented in fakeStore'); },
     listGroupCandidates: () => [],
+    listWrittenTaskTitles: () => [],
     getGroupCandidate: () => undefined,
     updateGroupCandidateStatus: () => {},
     tryReserveCandidateForApproval: () => true,

@@ -117,6 +117,28 @@ describe('group_candidates CRUD', () => {
     expect(all[1].id).toBe(older.id);
   });
 
+  it('listWrittenTaskTitles returns titles only from written candidates', () => {
+    // draft + sent adaylar dahil edilmez; yalnız 'written' (Perfex'e yazılmış).
+    store.insertGroupCandidate(candidate({
+      hash: 'h-draft', status: 'draft', tasks: [task({ title: 'Taslak görev' })]
+    }));
+    store.insertGroupCandidate(candidate({
+      hash: 'h-sent', status: 'sent', tasks: [task({ title: 'Onayda görev' })]
+    }));
+    store.insertGroupCandidate(candidate({
+      hash: 'h-written', status: 'written',
+      tasks: [task({ title: 'Logo revize' }), task({ title: 'Banner hazırla' })]
+    }));
+
+    const titles = store.listWrittenTaskTitles('esmark-test', '120363000000000000@g.us');
+    expect(titles.sort()).toEqual(['Banner hazırla', 'Logo revize']);
+  });
+
+  it('listWrittenTaskTitles returns empty array when no written candidates', () => {
+    store.insertGroupCandidate(candidate({ hash: 'h-only-draft', status: 'draft' }));
+    expect(store.listWrittenTaskTitles('esmark-test', '120363000000000000@g.us')).toEqual([]);
+  });
+
   it('listGroupCandidates is scoped per chat and tenant', () => {
     store.insertGroupCandidate(candidate({ chatId: 'a@g.us', hash: 'a' }));
     store.insertGroupCandidate(candidate({ chatId: 'b@g.us', hash: 'b' }));

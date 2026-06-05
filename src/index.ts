@@ -11,6 +11,7 @@ import { startBaileysClient, type BaileysClientOptions } from './whatsapp/bailey
 import { createDrivePythonRunner, createMediaArchiver } from './media/media-archiver.js';
 import { createPerfexReader } from './perfex/perfex-reader.js';
 import { createExtractionRunner } from './candidate/extraction-runner.js';
+import { filterUnwrittenTasks } from './candidate/task-dedup.js';
 import { createApprovalRequester } from './approval/approval-requester.js';
 import { readCustomerCard } from './customer/customer-card-reader.js';
 import { parseGroupMappings, upsertGroupMapping } from './customer/vault-group-mapping.js';
@@ -224,13 +225,26 @@ async function main(): Promise<void> {
   // grup CRM eşlemesiyle zenginleştirip group_candidates'a (status:'draft') yazar. Hash ile dedup —
   // aynı özet/görev seti tekrar üretilirse store mevcut adayı döner. extractionRunner throw etmez;
   // yine de defansif try-catch (eşleme okuması / store yazımı patlayabilir).
-  async function extractGroup(chatId: string): Promise<{ ok: boolean; candidateId?: number; error?: string }> {
+  async function extractGroup(chatId: string): Promise<{ ok: boolean; candidateId?: number; error?: string; note?: string; droppedCount?: number }> {
     if (!chatId.endsWith('@g.us')) return { ok: false, error: 'sadece grup' };
     try {
       const result = await extractionRunner.extractGroup(chatId);
       if (!result.ok) return { ok: false, error: result.error ?? 'extraction_failed' };
       const summary = result.summary ?? '';
-      const tasks = result.tasks ?? [];
+      const allTasks = result.tasks ?? [];
+
+      // Dedup: zaten Perfex'e yazılmış ('written') görevleri ele — cron aynı pencereyi tekrar
+      // çıkardığında işlenmiş görev yeni aday/onaya düşmesin. Sadece 'written' filtrelenir
+      // ('sent'/reddedilen hariç tutulmaz; yoksa reddedilmiş görev kalıcı kaybolur).
+      const writtenTitles = store.listWrittenTaskTitles(config.tenantId, chatId);
+      const tasks = filterUnwrittenTasks(allTasks, writtenTitles);
+      const droppedCount = allTasks.length - tasks.length;
+
+      // Tüm görevler zaten işlenmişse yeni draft üretme (boş re-onay / mükerrer aday önlenir).
+      // Mevcut draftlara dokunma — içlerinde henüz yazılmamış görev olabilir.
+      if (tasks.length === 0) {
+        return { ok: true, note: droppedCount > 0 ? 'all_tasks_already_written' : 'no_tasks', droppedCount };
+      }
 
       // Grup CRM eşlemesinden firma/proje bağlamını çöz (varsa). Eşleme yoksa alanlar undefined kalır.
       const mapping = store.getGroupCrmMapping(config.tenantId, chatId);
@@ -259,7 +273,7 @@ async function main(): Promise<void> {
       // Supersede: yeni aday üretildi → aynı grubun eski 'draft' adaylarını 'discarded' yap
       // (yeni aday hariç). Grup başına tek güncel taslak kalsın.
       store.discardDraftCandidates(config.tenantId, chatId, candidate.id);
-      return { ok: true, candidateId: candidate.id };
+      return { ok: true, candidateId: candidate.id, ...(droppedCount > 0 ? { droppedCount } : {}) };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : 'aday çıkarılamadı' };
     }

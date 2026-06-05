@@ -127,6 +127,8 @@ export interface MessageStore {
   // Grup mesajlarından çıkarılan görev adayları (group_candidates tablosu).
   insertGroupCandidate(c: NewGroupCandidate): GroupCandidate;
   listGroupCandidates(tenantId: string, chatId: string): GroupCandidate[];
+  // 'written' (Perfex'e yazılmış) adayların görev başlıkları — extraction dedup için.
+  listWrittenTaskTitles(tenantId: string, chatId: string): string[];
   getGroupCandidate(tenantId: string, id: number): GroupCandidate | undefined;
   updateGroupCandidateStatus(tenantId: string, id: number, status: CandidateStatus): void;
   // Atomik rezervasyon: yalnız 'draft' iken 'sent'e çevirir (CAS); başarılıysa true. Çift onayı önler.
@@ -548,6 +550,12 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
     ORDER BY created_at DESC, id DESC
   `);
 
+  // Yalnız 'written' adayların tasks_json'ı — extraction dedup başlık kaynağı.
+  const listWrittenTaskTitlesStmt = db.prepare<[string, string], { tasks_json: string }>(`
+    SELECT tasks_json FROM group_candidates
+    WHERE tenant_id = ? AND chat_id = ? AND status = 'written'
+  `);
+
   const updateCandidateStatusStmt = db.prepare<[string, string, string, number]>(`
     UPDATE group_candidates SET status = ?, updated_at = ?
     WHERE tenant_id = ? AND id = ?
@@ -824,6 +832,25 @@ export function createSqliteMessageStore(dbPath: string): MessageStore {
 
     listGroupCandidates(tenantId: string, chatId: string): GroupCandidate[] {
       return listCandidatesStmt.all(tenantId, chatId).map(rowToGroupCandidate);
+    },
+
+    listWrittenTaskTitles(tenantId: string, chatId: string): string[] {
+      const rows = listWrittenTaskTitlesStmt.all(tenantId, chatId);
+      const titles: string[] = [];
+      for (const row of rows) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(row.tasks_json);
+        } catch {
+          continue; // bozuk json → atla
+        }
+        if (!Array.isArray(parsed)) continue;
+        for (const t of parsed) {
+          const title = (t as { title?: unknown })?.title;
+          if (typeof title === 'string' && title.trim()) titles.push(title);
+        }
+      }
+      return titles;
     },
 
     getGroupCandidate(tenantId: string, id: number): GroupCandidate | undefined {
