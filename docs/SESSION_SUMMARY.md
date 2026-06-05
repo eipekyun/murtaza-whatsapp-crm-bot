@@ -1,6 +1,18 @@
 # SESSION_SUMMARY — murtaza-whatsapp-crm-bot
 
-Son güncelleme: 2026-06-04 (Zamanlanmış cron — eşli grupları periyodik özetler; uçtan uca doğrulandı)
+Son güncelleme: 2026-06-05 (Dedup + panel 3 sekme + Onayda-fix + restart — CANLI)
+
+## 2026-06-05 — Dedup + panel 3 sekme + Onayda-fix + restart (CANLI)
+
+Aday özet/görev sürecinde "işlenmiş görev tekrar onaya düşüyor" friction'ı çözüldü + panel sekmelendi.
+
+- **Extraction dedup** (commit `609c403`): `src/candidate/task-dedup.ts` (YENİ, saf: `normalizeTaskKey`+`filterUnwrittenTasks`), `store.listWrittenTaskTitles` (yalnız 'written' başlıklar), `index.extractGroup` yazılmış görevleri eler; hepsi yazılmışsa **yeni draft üretmez** (`note: all_tasks_already_written`, `droppedCount`). Sadece 'written' filtrelenir ('sent'/reddedilen hariç — reject yolu bot DB güncellemiyor, eleseydik kalıcı kaybolurdu). Gerçek fix burada çünkü per-task `dedup_hash` candidate.hash'ten türer, her cron run'da değişir → Perfex-side dedup run'lar arası zayıf.
+- **Panel 3 sekme** (commit `8982d4b`): aday kartı `candidates[0]` yerine status'e göre sekmeli — **Aktif** (draft) / **Onayda** (sent) / **İşlendi** (written), sayaç rozeti, discarded gizli. "Onaya Sun" yalnız Aktif; diğerleri salt-okunur. Extract'ta "N görev zaten işlenmişti, gizlendi" mesajı.
+- **Kalite:** tsc temiz, **153 test** (yeni 7: 5 dedup + 2 store), build exit 0, typescript-reviewer APPROVE (CRITICAL/HIGH yok).
+- **Onayda-fix (Hermes-side, git-dışı):** `resolve_approval.py` cancel→aday `'sent'`→`'discarded'`, edit→`'draft'` (yalnız status='sent' satırı, idempotent). Reddedilen aday artık 'sent'te takılmaz. **Yedek `resolve_approval.py.bak-onayda-fix-20260605-073417`** — Hermes update'inde re-apply. py_compile + SQL smoke geçti. Edit pratikte cancel'a maplanır (gateway `action!="publish"→cancel`); edit→draft dalı uykuda ama ileriye dönük doğru.
+- **RESTART (canlı):** gateway `systemctl restart hermes-gateway-murtaza` (resolve_approval yeni kod) + bot `tsx src/index.ts` **detached/setsid relaunch** (parent=init, gateway'den bağımsız — bot artık gateway child DEĞİL, Hermes `processes.json`'da yok, eski dead-pid entry stale ama `watcher_interval=0` zararsız). WA reconnect QR'sız. Panel yeni HTML curl ile doğrulandı.
+- **TEST EDİLMEMİŞ canlı yol:** Onayda-fix'in gerçek ❌İptal→discarded uçtan ucu (Telegram butonu buradan tetiklenemedi); cron-run dedup'ı prod'da ilk 09/15/21 TR koşusunda gözlenecek. Bot log: `data/wa-bot.log` (gitignore).
+
 
 ## 2026-06-04 — Zamanlanmış cron: eşli grupları periyodik özetle (Faz 3 sessiz-dinleyici)
 
