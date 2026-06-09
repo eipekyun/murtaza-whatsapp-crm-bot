@@ -534,6 +534,17 @@ body{margin:0;background:var(--bg);color:var(--text)}
 .prio-2{background:#1f4d3a;color:#7fe3b8}
 .prio-3{background:#5a4a1a;color:#f5c542}
 .prio-4{background:#5a2330;color:#ff9b9b}
+.projGroup{border-bottom:1px solid var(--line)}
+.projGroup:last-child{border-bottom:0}
+.projHeader{display:flex;align-items:center;gap:8px;padding:9px 0;cursor:pointer;user-select:none}
+.projHeader .chev{color:var(--muted);font-size:10px;transition:transform .15s;flex:0 0 auto}
+.projHeader.open .chev{transform:rotate(90deg)}
+.projName{font-size:13px;font-weight:600;flex:1;min-width:0;word-break:break-word}
+.projMeta{flex:0 0 auto;font-size:11px;color:var(--muted)}
+.projCount{flex:0 0 auto;font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;background:#1f4d3a;color:#7fe3b8}
+.projCount.zero{background:#2a3942;color:#aebac1}
+.projBody{padding:0 0 6px 18px}
+.projBody.collapsed{display:none}
 .taskErr{color:#ff9b9b;font-size:12px}
 .candStatusBadge{display:inline-block;font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;margin-left:6px;vertical-align:middle}
 .cand-draft{background:#2a3942;color:#aebac1}
@@ -841,8 +852,60 @@ body{margin:0;background:var(--bg);color:var(--text)}
     return '—';
   }
 
+  // Tek görev satırı (id + ad + status/termin + öncelik rozeti). Hem grup gövdesinde kullanılır.
+  function renderTaskRow(t){
+    var row = document.createElement('div'); row.className = 'taskRow';
+    var main = document.createElement('div'); main.className = 'taskMain';
+    var name = document.createElement('div'); name.className = 'taskName';
+    var idSpan = document.createElement('span'); idSpan.className = 'taskId'; idSpan.textContent = '#' + t.id + ' ';
+    name.appendChild(idSpan);
+    name.appendChild(document.createTextNode(t.name || ''));
+    main.appendChild(name);
+    var st = document.createElement('div'); st.className = 'taskStatus';
+    st.textContent = (t.statusLabel || 'Bilinmiyor') + (t.dueDate ? ' · termin ' + t.dueDate : '');
+    main.appendChild(st);
+    row.appendChild(main);
+    var prio = document.createElement('span');
+    var prioClass = (t.priority >= 1 && t.priority <= 4) ? t.priority : 1;
+    prio.className = 'prioBadge prio-' + prioClass;
+    prio.textContent = priorityLabel(t.priority);
+    row.appendChild(prio);
+    return row;
+  }
+
+  // Tıklanabilir grup: başlık (proje adı + durum + açık görev sayısı) + altında görev gövdesi.
+  // Başlığa tıklayınca gövde açılır/kapanır (read-only; Perfex'e hiçbir yazma yok).
+  // expanded=true ise grup açık başlar (açık görevi olan projeler açık gelsin).
+  function renderTaskGroup(title, meta, taskList, expanded){
+    var group = document.createElement('div'); group.className = 'projGroup';
+    var header = document.createElement('div'); header.className = 'projHeader' + (expanded ? ' open' : '');
+    var chev = document.createElement('span'); chev.className = 'chev'; chev.textContent = '▶';
+    header.appendChild(chev);
+    var nm = document.createElement('span'); nm.className = 'projName'; nm.textContent = title;
+    header.appendChild(nm);
+    if (meta) { var mt = document.createElement('span'); mt.className = 'projMeta'; mt.textContent = meta; header.appendChild(mt); }
+    var cnt = document.createElement('span');
+    cnt.className = 'projCount' + (taskList.length ? '' : ' zero');
+    cnt.textContent = taskList.length + ' açık';
+    header.appendChild(cnt);
+    group.appendChild(header);
+    var body = document.createElement('div'); body.className = 'projBody' + (expanded ? '' : ' collapsed');
+    if (taskList.length) {
+      taskList.forEach(function(t){ body.appendChild(renderTaskRow(t)); });
+    } else {
+      var none = document.createElement('div'); none.className = 'sub'; none.textContent = 'Açık görev yok.';
+      body.appendChild(none);
+    }
+    group.appendChild(body);
+    header.addEventListener('click', function(){
+      var collapsed = body.classList.toggle('collapsed');
+      header.classList.toggle('open', !collapsed);
+    });
+    return group;
+  }
+
   // ON-DEMAND: sohbet açılışında OTOMATİK çağrılmaz; operatör butona basınca çalışır (SSH latency).
-  // Liste read-only — Faz 2 yalnız görüntüleme, görev tıklanamaz/aksiyon yok.
+  // Görevler projeye göre gruplanır; proje başlığı tıklanınca o projenin görevleri açılır/kapanır.
   async function loadPerfexTasks(){
     if (!selectedChatId) { alert('Önce konuşma seç'); return; }
     var status = $('perfexTasksStatus');
@@ -864,35 +927,35 @@ body{margin:0;background:var(--bg);color:var(--text)}
     }
     var tasks = data.tasks || [];
     var projects = data.projects || [];
-    var summary = tasks.length + ' görev';
-    if (projects.length) summary += ' · ' + projects.length + ' proje';
-    status.textContent = summary;
-    if (!tasks.length) {
-      var none = document.createElement('div');
-      none.className = 'sub';
-      none.textContent = 'Açık görev yok.';
+    status.textContent = tasks.length + ' açık görev · ' + projects.length + ' proje';
+
+    if (!tasks.length && !projects.length) {
+      var none = document.createElement('div'); none.className = 'sub';
+      none.textContent = 'Bu firmada açık görev ya da proje yok.';
       list.appendChild(none);
       return;
     }
+
+    // Görevleri ait oldukları projeye göre kovala (projectId 0 = firmaya doğrudan bağlı).
+    var byProject = {};
     tasks.forEach(function(t){
-      var row = document.createElement('div'); row.className = 'taskRow';
-      var main = document.createElement('div'); main.className = 'taskMain';
-      var name = document.createElement('div'); name.className = 'taskName';
-      var idSpan = document.createElement('span'); idSpan.className = 'taskId'; idSpan.textContent = '#' + t.id + ' ';
-      name.appendChild(idSpan);
-      name.appendChild(document.createTextNode(t.name || ''));
-      main.appendChild(name);
-      var st = document.createElement('div'); st.className = 'taskStatus';
-      st.textContent = (t.statusLabel || 'Bilinmiyor') + (t.dueDate ? ' · termin ' + t.dueDate : '');
-      main.appendChild(st);
-      row.appendChild(main);
-      var prio = document.createElement('span');
-      var prioClass = (t.priority >= 1 && t.priority <= 4) ? t.priority : 1;
-      prio.className = 'prioBadge prio-' + prioClass;
-      prio.textContent = priorityLabel(t.priority);
-      row.appendChild(prio);
-      list.appendChild(row);
+      var k = t.projectId || 0;
+      (byProject[k] = byProject[k] || []).push(t);
     });
+
+    // Her proje bir grup; açık görevi olanlar açık (expanded) başlar.
+    projects.forEach(function(p){
+      var pt = byProject[p.id] || [];
+      delete byProject[p.id];
+      list.appendChild(renderTaskGroup(p.name || ('Proje #' + p.id), p.statusLabel || '', pt, pt.length > 0));
+    });
+
+    // Projeye bağlı olmayan (firma geneli) görevler — projectId 0 veya listede olmayan proje.
+    var orphan = [];
+    Object.keys(byProject).forEach(function(k){ orphan = orphan.concat(byProject[k]); });
+    if (orphan.length) {
+      list.appendChild(renderTaskGroup('Firma geneli (proje dışı)', '', orphan, true));
+    }
   }
 
   function resetPerfexTasks(){

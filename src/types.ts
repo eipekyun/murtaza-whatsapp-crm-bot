@@ -124,7 +124,7 @@ export interface ProjectOption {
 }
 
 // Perfex READ-ONLY sorgu sonuçları (scripts/perfex-query.py JSON sözleşmesi).
-// status: 1=Başlamadı, 2=Devam, 3=Test, 4=Geri Bildirim, 5=Tamamlandı
+// task status: 1=Başlamadı, 2=Devam, 3=Test, 4=Geri Bildirim, 5=Tamamlandı
 export interface PerfexTask {
   id: number;
   name: string;
@@ -132,12 +132,17 @@ export interface PerfexTask {
   status: number;
   statusLabel: string;
   dueDate?: string;
+  // Görevin bağlı olduğu Perfex projesi. 0 = firmaya doğrudan bağlı (proje dışı) görev.
+  // Açık görevlerin çoğu projeye bağlıdır (rel_type='project'); panel bunları projeye göre gruplar.
+  projectId: number;
 }
 
+// project status: 1=Başlamadı, 2=Devam Ediyor, 3=Beklemede, 4=Tamamlandı, 5=İptal
 export interface PerfexProjectStatus {
   id: number;
   name: string;
   status: number;
+  statusLabel: string;
 }
 
 export interface PerfexQueryResult {

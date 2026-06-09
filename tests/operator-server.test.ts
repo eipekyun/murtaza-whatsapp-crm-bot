@@ -427,10 +427,10 @@ describe('operator HTTP API', () => {
         calls.push(chatId);
         return {
           tasks: [
-            { id: 91, name: 'Reklam metni revize', priority: 3, status: 2, statusLabel: 'Devam Ediyor' },
-            { id: 92, name: 'Logo onayı', priority: 1, status: 1, statusLabel: 'Başlamadı', dueDate: '2026-06-10' }
+            { id: 91, name: 'Reklam metni revize', priority: 3, status: 2, statusLabel: 'Devam Ediyor', projectId: 40 },
+            { id: 92, name: 'Logo onayı', priority: 1, status: 1, statusLabel: 'Başlamadı', dueDate: '2026-06-10', projectId: 0 }
           ],
-          projects: [{ id: 40, name: 'Voyelle Sosyal', status: 2 }],
+          projects: [{ id: 40, name: 'Voyelle Sosyal', status: 2, statusLabel: 'Devam Ediyor' }],
           error: null
         };
       }
@@ -446,8 +446,8 @@ describe('operator HTTP API', () => {
       expect(calls).toEqual([chatId]);
       expect(body.error).toBeNull();
       expect(body.tasks).toHaveLength(2);
-      expect(body.tasks[0]).toMatchObject({ id: 91, name: 'Reklam metni revize', statusLabel: 'Devam Ediyor', priority: 3 });
-      expect(body.projects).toEqual([{ id: 40, name: 'Voyelle Sosyal', status: 2 }]);
+      expect(body.tasks[0]).toMatchObject({ id: 91, name: 'Reklam metni revize', statusLabel: 'Devam Ediyor', priority: 3, projectId: 40 });
+      expect(body.projects).toEqual([{ id: 40, name: 'Voyelle Sosyal', status: 2, statusLabel: 'Devam Ediyor' }]);
 
       const missing = await authedFetch(url(server, '/api/perfex-tasks'));
       expect(missing.status).toBe(400);

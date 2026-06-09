@@ -24,13 +24,23 @@ from typing import Optional
 
 DEFAULT_OPS_ENV = "~/.config/murtaza-vps-ops.env"
 
-# status: 1=Başlamadı, 2=Devam, 3=Test, 4=Geri Bildirim, 5=Tamamlandı
+# task status (tbltasks.status): 1=Başlamadı, 2=Devam, 3=Test, 4=Geri Bildirim, 5=Tamamlandı
 STATUS_LABELS = {
     1: "Başlamadı",
     2: "Devam Ediyor",
     3: "Test",
     4: "Geri Bildirim",
     5: "Tamamlandı",
+}
+
+# project status (tblprojects.status) AYRI bir kod kümesi — görev status'undan farklıdır.
+# 1=Başlamadı, 2=Devam Ediyor, 3=Beklemede, 4=Tamamlandı, 5=İptal.
+PROJECT_STATUS_LABELS = {
+    1: "Başlamadı",
+    2: "Devam Ediyor",
+    3: "Beklemede",
+    4: "Tamamlandı",
+    5: "İptal",
 }
 
 
@@ -128,24 +138,39 @@ def to_int(value: str, default: int = 0) -> int:
         return default
 
 
-def fetch_tasks(client_id: int) -> list[dict]:
+def fetch_tasks(client_id: int, project_ids: list[int]) -> list[dict]:
+    """Açık görevleri çeker: firmaya doğrudan bağlı (rel_type='client') VE firmanın
+    projelerine bağlı (rel_type='project') görevler birlikte.
+
+    Perfex'te açık görevlerin çoğu projeye bağlıdır; eski sorgu yalnız 'client' baktığı
+    için projedeki işler '0 görev' görünüyordu. Her göreve projectId etiketi eklenir
+    (proje-görevinde rel_id, firma-görevinde 0) ki panel projeye göre gruplayabilsin.
+    """
+    conds = [f"(rel_type='client' AND rel_id={client_id})"]
+    if project_ids:
+        ids = ",".join(str(int(pid)) for pid in project_ids)
+        conds.append(f"(rel_type='project' AND rel_id IN ({ids}))")
+    where = " OR ".join(conds)
     sql = (
-        "SELECT id,name,priority,status,IFNULL(duedate,'') "
-        f"FROM tbltasks WHERE rel_type='client' AND rel_id={client_id} AND status<5 "
-        "ORDER BY priority DESC, id DESC LIMIT 25;"
+        "SELECT id,name,priority,status,IFNULL(duedate,''),rel_type,rel_id "
+        f"FROM tbltasks WHERE ({where}) AND status<5 "
+        "ORDER BY priority DESC, id DESC LIMIT 80;"
     )
     tasks: list[dict] = []
     for cols in parse_rows(perfex_select(sql)):
-        if len(cols) < 5:
+        if len(cols) < 7:
             continue
         status = to_int(cols[3])
         due = cols[4].strip()
+        rel_type = cols[5].strip()
+        project_id = to_int(cols[6]) if rel_type == "project" else 0
         task: dict = {
             "id": to_int(cols[0]),
             "name": cols[1],
             "priority": to_int(cols[2]),
             "status": status,
             "statusLabel": STATUS_LABELS.get(status, "Bilinmiyor"),
+            "projectId": project_id,
         }
         if due:
             task["dueDate"] = due
@@ -155,7 +180,11 @@ def fetch_tasks(client_id: int) -> list[dict]:
 
 def fetch_projects(client_id: int) -> list[dict]:
     # tblprojects.clientid bazı kurulumlarda yok; o durumda boş liste döner, hata vermez.
-    sql = f"SELECT id,name,status FROM tblprojects WHERE clientid={client_id} LIMIT 15;"
+    # Sıralama: açık/devam eden projeler (status<4) üstte, tamamlanan/iptal altta.
+    sql = (
+        "SELECT id,name,status FROM tblprojects "
+        f"WHERE clientid={client_id} ORDER BY status ASC, id DESC LIMIT 30;"
+    )
     try:
         out = perfex_select(sql)
     except QueryError:
@@ -164,10 +193,12 @@ def fetch_projects(client_id: int) -> list[dict]:
     for cols in parse_rows(out):
         if len(cols) < 3:
             continue
+        status = to_int(cols[2])
         projects.append({
             "id": to_int(cols[0]),
             "name": cols[1],
-            "status": to_int(cols[2]),
+            "status": status,
+            "statusLabel": PROJECT_STATUS_LABELS.get(status, "Bilinmiyor"),
         })
     return projects
 
@@ -192,8 +223,10 @@ def main() -> None:
     try:
         client_id = int(args.client_id)  # explicit guard even though argparse already typed it
         load_ops_env(resolve_ops_env(args.ops_env))
-        tasks = fetch_tasks(client_id)
+        # Projeler önce: id'leri görev sorgusunda rel_type='project' filtresine besler.
         projects = fetch_projects(client_id)
+        project_ids = [to_int(p["id"]) for p in projects if to_int(p["id"]) > 0]
+        tasks = fetch_tasks(client_id, project_ids)
         emit({"tasks": tasks, "projects": projects, "error": None})
     except QueryError as exc:
         emit({"tasks": [], "projects": [], "error": str(exc)})
